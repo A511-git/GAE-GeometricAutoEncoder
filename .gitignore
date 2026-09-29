@@ -1,0 +1,33 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.pytest_cache/
+dist/
+build/
+
+# Weights and run artifacts (download from Hugging Face)
+ckpts/
+results/
+wandb/
+hf_home/
+hf_cache/
+*.safetensors
+*.pt
+!model_stats/**/*.pt
+
+# Local MIT copy — GitHub ships LICENSE.txt
+LICENSE
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# GT clips are regenerable from eval dumps and are not distributed.
+examples/scenes/*_gt.mp4
+.write_test
+user_files
