@@ -212,6 +212,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--save-pointcloud", action="store_true", default=True)
     parser.add_argument("--no-pointcloud", dest="save_pointcloud", action="store_false")
     parser.add_argument("--pc-stride", type=int, default=4)
+    parser.add_argument("--precision", choices=["fp32", "bf16", "fp16"], default="bf16")
 
     args, extra = parser.parse_known_args()
     if extra and extra[0] == "--":
@@ -414,6 +415,7 @@ def main() -> int:
             "--seed", str(args.seed),
             "--video-fps", str(args.fps),
             "--pc-stride", str(args.pc_stride),
+            "--precision", str(args.precision),
             "--output-dir", str(run_out_dir),
             *extra,
         ]
