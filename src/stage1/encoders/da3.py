@@ -3,6 +3,8 @@
 Unified encoder class that consolidates all forward logic into a single interface.
 """
 
+import os
+import sys
 import torch
 import torch.nn as nn
 from typing import Optional, List, Tuple, Dict, Union
