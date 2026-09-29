@@ -158,6 +158,33 @@ class DA3EncoderDirect(nn.Module):
         # Prepare RoPE
         pos_all, pos_nodiff_all = trans._prepare_rope(B, S, H, W, x.device)
         
+        # Check if 2-GPU splitting is available
+        use_2gpu = (
+            torch.cuda.device_count() >= 2
+            and x.is_cuda
+            and os.environ.get("GAE_DISABLE_2GPU_SPLIT", "0") != "1"
+        )
+        if use_2gpu:
+            dev0 = x.device
+            dev1 = torch.device("cuda:1")
+            split_at = len(trans.blocks) // 2
+
+            # Ensure blocks [split_at:] reside on cuda:1
+            if not getattr(self, "_blocks_split_done", False) or next(trans.blocks[split_at].parameters()).device != dev1:
+                for blk in trans.blocks[split_at:]:
+                    blk.to(dev1)
+                self._blocks_split_done = True
+
+            def _mv(t, dev):
+                if t is None:
+                    return None
+                if isinstance(t, (tuple, list)):
+                    return type(t)(_mv(y, dev) for y in t)
+                return t.to(dev)
+
+            pos_all_1 = _mv(pos_all, dev1)
+            pos_nodiff_all_1 = _mv(pos_nodiff_all, dev1)
+
         current_x = x
         local_x = None
         results = {}
@@ -166,12 +193,21 @@ class DA3EncoderDirect(nn.Module):
             target_layers = self.OUT_LAYERS
         
         for i, blk in enumerate(trans.blocks):
+            if use_2gpu:
+                if i == split_at:
+                    current_x = current_x.to(dev1)
+                    local_x = None if local_x is None else local_x.to(dev1)
+                on1 = i >= split_at
+                P_all, P_nodiff = (pos_all_1, pos_nodiff_all_1) if on1 else (pos_all, pos_nodiff_all)
+            else:
+                P_all, P_nodiff = pos_all, pos_nodiff_all
+
             # RoPE logic
             if i < trans.rope_start or trans.rope is None:
                 g_pos, l_pos = None, None
             else:
-                g_pos = pos_nodiff_all
-                l_pos = pos_all
+                g_pos = P_nodiff
+                l_pos = P_all
 
             # Camera Token Handling
             if trans.alt_start != -1 and i == trans.alt_start:
@@ -181,7 +217,7 @@ class DA3EncoderDirect(nn.Module):
                     cam_token = torch.cat([ref_token, src_token], dim=1)
                 else:
                     cam_token = ref_token
-                current_x[:, :, 0] = cam_token
+                current_x[:, :, 0] = cam_token.to(current_x.device)
 
             # Attention mechanics
             if trans.alt_start != -1 and i >= trans.alt_start and i % 2 == 1:
@@ -202,6 +238,8 @@ class DA3EncoderDirect(nn.Module):
                 curr_sq = current_x.view(B * S, N, -1)
                 loc_sq = local_x.view(B * S, N, -1)
                 out_raw = torch.cat([loc_sq, curr_sq], dim=-1)
+                if use_2gpu:
+                    out_raw = out_raw.to(dev0)
                 results[i] = out_raw
                 
                 if stop_at_first:
