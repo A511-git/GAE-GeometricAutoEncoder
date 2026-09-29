@@ -384,6 +384,8 @@ def main() -> int:
         print(f"[multiview_reframer] No single anchor specified: generating novel views for ALL {len(anchor_indices)} images.")
 
     env = os.environ.copy()
+    env.pop("HF_HUB_OFFLINE", None)
+    env.pop("TRANSFORMERS_OFFLINE", None)
     env["PYTHONPATH"] = f"{ROOT / 'src'}:{ROOT / 'scripts' / 'eval'}:{env.get('PYTHONPATH', '')}"
 
     for anchor_idx in anchor_indices:

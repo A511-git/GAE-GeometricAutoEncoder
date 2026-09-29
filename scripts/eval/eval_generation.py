@@ -3046,6 +3046,14 @@ def main():
     print(f"  Output:          {args.output_dir}")
     print("=" * 60)
 
+    for _var in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"):
+        os.environ.pop(_var, None)
+    try:
+        import huggingface_hub.constants as hf_constants
+        hf_constants.HF_HUB_OFFLINE = False
+    except Exception:
+        pass
+
     use_amp = args.precision in ("bf16", "fp16")
     amp_dtype = torch.bfloat16 if args.precision == "bf16" else (torch.float16 if args.precision == "fp16" else torch.float32)
 

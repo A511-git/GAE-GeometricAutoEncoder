@@ -45,6 +45,15 @@ class DA3EncoderDirect(nn.Module):
 
         self.level = level
 
+        # Ensure offline mode is not accidentally blocking HF Hub model downloads
+        for _var in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"):
+            os.environ.pop(_var, None)
+        try:
+            import huggingface_hub.constants as hf_constants
+            hf_constants.HF_HUB_OFFLINE = False
+        except Exception:
+            pass
+
         # Load DA3 and extract backbone. Keep the DPT / GS heads too: the
         # released demo often has no local ``model.safetensors``, and
         # ``DA3Backbone`` used to skip geometry decode in that case. The Hub
