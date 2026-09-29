@@ -30,4 +30,6 @@ LICENSE
 # GT clips are regenerable from eval dumps and are not distributed.
 examples/scenes/*_gt.mp4
 .write_test
-user_files
+# user_files
+!user_files/
+!user_files/**
