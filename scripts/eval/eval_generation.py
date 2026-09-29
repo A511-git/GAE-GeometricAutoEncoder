@@ -1343,7 +1343,7 @@ def parse_args():
                    help="Views per model interpolation pass. Default: --num-views "
                         "(V17 model uses 17).")
     p.add_argument("--time-dist-shift", type=float, default=None)
-    p.add_argument("--precision", choices=["fp32", "bf16"], default="bf16")
+    p.add_argument("--precision", choices=["fp32", "bf16", "fp16"], default="bf16")
     p.add_argument("--loss-t", type=str, default="0.5")
     p.add_argument("--loss-samples", type=int, default=1)
     p.add_argument("--loss-only", action="store_true")
@@ -1482,14 +1482,17 @@ def build_inference_inputs(
         feats_all:  raw DA3 features (all-view ctx) for DPT depth.
     """
     V = img_tensors.shape[0]
-    imgs_5d = img_tensors.unsqueeze(0).to(device)
+    p_dtype = next(rae.parameters()).dtype if rae is not None else torch.float32
+    imgs_5d = img_tensors.unsqueeze(0).to(device=device, dtype=p_dtype)
 
     def _encode(imgs):
-        feats = rae.encode(imgs, mode="all")
-        feats_no_cls = {k: v[:, 1:, :] for k, v in feats.items()}
-        x_n = vae.normalize_levels(feats_no_cls, image_size=(H_img, W_img))
-        z = vae.encode(x_n)[0]
-        return z, x_n, feats
+        imgs_in = imgs.to(device=device, dtype=p_dtype) if imgs.dtype != p_dtype else imgs
+        with torch.amp.autocast("cuda", enabled=(p_dtype in (torch.bfloat16, torch.float16)), dtype=p_dtype):
+            feats = rae.encode(imgs_in, mode="all")
+            feats_no_cls = {k: v[:, 1:, :] for k, v in feats.items()}
+            x_n = vae.normalize_levels(feats_no_cls, image_size=(H_img, W_img))
+            z = vae.encode(x_n)[0]
+            return z, x_n, feats
 
     z_all, x_norm, feats_all = _encode(imgs_5d)
 
@@ -3043,8 +3046,8 @@ def main():
     print(f"  Output:          {args.output_dir}")
     print("=" * 60)
 
-    use_amp = args.precision == "bf16"
-    amp_dtype = torch.bfloat16 if use_amp else torch.float32
+    use_amp = args.precision in ("bf16", "fp16")
+    amp_dtype = torch.bfloat16 if args.precision == "bf16" else (torch.float16 if args.precision == "fp16" else torch.float32)
 
     rae = None
 
@@ -3219,7 +3222,7 @@ def main():
             rae_kwargs["da3_weights_path"] = _cache_file(args.da3_weights)
         print(f"  DA3 encoder: {rae_kwargs['encoder_pretrained_path']} "
               f"(input={rae_kwargs['encoder_input_size']}, dpt_model={rae_kwargs['dpt_model_type']})")
-        rae = DA3Backbone(**rae_kwargs).to(device).eval()
+        rae = DA3Backbone(**rae_kwargs).to(device=device, dtype=amp_dtype).eval()
         has_dpt = rae.rae_cl_decoder is not None
         encoder_mean = rae.encoder_mean
         encoder_std = rae.encoder_std
@@ -3242,7 +3245,7 @@ def main():
         vae_cfg.pop("rgb_decoder_hidden", None)
         vae_cfg.pop("rgb_decoder_heads", None)
 
-        vae = GAECodec(**vae_cfg).to(device).eval()
+        vae = GAECodec(**vae_cfg).to(device=device, dtype=amp_dtype).eval()
         missing, unexpected = vae.load_state_dict(vae_sd, strict=False)
         if args.timing_json:
             vae._decode_trunk = _timed(vae._decode_trunk, "latent_vae_decode")
@@ -3276,7 +3279,7 @@ def main():
             model_cfg["params"] = {}
         model_cfg["params"]["input_size"] = latent_h
         print(f"  [dit] auto input_size={latent_h} (from {H}×{W} RGB)")
-    dit = instantiate_from_config(model_cfg).to(device).eval()
+    dit = instantiate_from_config(model_cfg).to(device=device, dtype=amp_dtype).eval()
     dit_ckpt = _fast_load(args.dit_ckpt, map_location="cpu")
     # Released checkpoints are bare state_dicts; training checkpoints wrap the
     # weights under 'ema' / 'model' / 'state_dict'.
@@ -3302,6 +3305,7 @@ def main():
         for k in stale:
             del dit_sd[k]
     missing, unexpected = dit.load_state_dict(dit_sd, strict=False)
+    dit = dit.to(device=device, dtype=amp_dtype).eval()
     if missing:
         print(f"  [WARN] {len(missing)} model key(s) not in ckpt (random init): "
               f"{missing[:5]}{'...' if len(missing) > 5 else ''}")

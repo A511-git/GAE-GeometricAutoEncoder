@@ -217,7 +217,7 @@ class DA3EncoderDirect(nn.Module):
                     cam_token = torch.cat([ref_token, src_token], dim=1)
                 else:
                     cam_token = ref_token
-                current_x[:, :, 0] = cam_token.to(current_x.device)
+                current_x[:, :, 0] = cam_token.to(device=current_x.device, dtype=current_x.dtype)
 
             # Attention mechanics
             if trans.alt_start != -1 and i >= trans.alt_start and i % 2 == 1:
