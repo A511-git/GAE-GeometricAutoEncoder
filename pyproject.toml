@@ -55,9 +55,9 @@ eval = [
     # torch_dct is optional too: src/metrics/latent.py ships a pure-torch
     # DCT fallback that gives identical results when it is absent.
 ]
-# Optional optimiser. Not installed by default: it pins torch>=2.7.1 while this
-# project sits on torch==2.5.1. The trainer falls back to AdamW when absent.
-muon = ["gram-newton-schulz"]
+# Optional optimiser. Commented out because gram-newton-schulz requires torch>=2.7.1,
+# which conflicts with torch==2.5.1 pinned above. The trainer falls back to AdamW when absent.
+# muon = ["gram-newton-schulz"]
 # Optional, for the OSP dataset loader and the BLIP3o webdataset path.
 data = ["orjson", "pyarrow", "webdataset", "s3torchconnector"]
 # Gradio UI in app.py. Kept optional so the core API/training install does not
@@ -82,3 +82,9 @@ include = [
 
 [tool.ruff]
 line-length = 100
+
+[tool.uv]
+environments = [
+    "sys_platform == 'linux' and python_version >= '3.10' and python_version < '3.13'",
+    "sys_platform == 'win32' and python_version >= '3.10' and python_version < '3.13'",
+]
