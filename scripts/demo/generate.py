@@ -98,6 +98,10 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--save-pointcloud", action="store_true", default=True,
                         help="Write DPT depth + .ply (default on).")
     parser.add_argument("--no-pointcloud", dest="save_pointcloud", action="store_false")
+    parser.add_argument("--low-vram", action="store_true", default=True,
+                        help="Enable low VRAM sequential offload mode (default on).")
+    parser.add_argument("--no-low-vram", dest="low_vram", action="store_false",
+                        help="Disable low VRAM mode and keep all models in GPU memory.")
     parser.add_argument("--pc-stride", type=int, default=4)
     args, extra = parser.parse_known_args()
     if extra and extra[0] == "--":
@@ -359,6 +363,7 @@ def _launch_eval(args: argparse.Namespace, extra: list[str], manifest: Path, env
         *extra,
     ]
     command.append("--save-pointcloud" if args.save_pointcloud else "--no-pointcloud")
+    command.append("--low-vram" if args.low_vram else "--no-low-vram")
     if args.ulysses_size < 1:
         raise SystemExit("--ulysses-size must be >= 1")
     if args.cfg_parallel and args.ulysses_size < 2:

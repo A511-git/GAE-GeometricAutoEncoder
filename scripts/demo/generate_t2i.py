@@ -124,6 +124,10 @@ def parse_args():
     p.add_argument("--save-pointcloud", action="store_true", default=True,
                    help="Decode DPT depth + write a .ply (default on).")
     p.add_argument("--no-pointcloud", dest="save_pointcloud", action="store_false")
+    p.add_argument("--low-vram", action="store_true", default=True,
+                   help="Enable sequential model offloading to keep peak VRAM bounded (default: True).")
+    p.add_argument("--no-low-vram", dest="low_vram", action="store_false",
+                   help="Disable low VRAM mode and keep all models concurrently in GPU memory.")
     p.add_argument("--pc-stride", type=int, default=4,
                    help="Subsample stride for the T2I point cloud.")
     return p.parse_args()
@@ -389,19 +393,35 @@ def main():
     print(f"  rgb    : {W}x{H} (WxH)  latent: {latent_h}x{latent_w}")
     print("=" * 68)
 
+    def _offload(*modules):
+        if not args.low_vram:
+            return
+        for m in modules:
+            if m is not None and hasattr(m, "to"):
+                m.to("cpu")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def _to_dev(m):
+        if m is not None and hasattr(m, "to"):
+            m.to(device)
+        return m
+
+    load_device = "cpu" if args.low_vram else device
+
     print("[1/4] flow (DiT) ...")
-    dit, model_cfg = _load_dit(cfg, args.flow_ckpt, args.use_ema, device,
+    dit, model_cfg = _load_dit(cfg, args.flow_ckpt, args.use_ema, load_device,
                                allow_partial=args.allow_partial_dit)
     in_ch = int(model_cfg["params"].get("in_channels", 128))
 
     print("[2/5] codec (RGB head) ...")
-    codec = _load_codec(cfg, args.codec_ckpt, args.rgb_head_temporal, device)
+    codec = _load_codec(cfg, args.codec_ckpt, args.rgb_head_temporal, load_device)
     if int(codec.latent_dim) != in_ch:
         raise RuntimeError(f"flow in_channels={in_ch} but codec latent_dim="
                            f"{codec.latent_dim}; config/checkpoint mismatch")
 
     print("[3/5] DA3 DPT (depth / point cloud) ...")
-    rae = _load_backbone(cfg, device) if args.save_pointcloud else None
+    rae = _load_backbone(cfg, load_device) if args.save_pointcloud else None
     if args.save_pointcloud and (rae is None or rae.rae_cl_decoder is None):
         print("  [WARN] DPT unavailable; RGB only")
         rae = None
@@ -410,6 +430,8 @@ def main():
     text_enc, null_tokens = _load_text_encoder(cfg, device, dtype)
     if text_enc is None and args.guidance in {"cfg", "cfg_ig"}:
         raise ValueError("CFG requested but use_text=false")
+    if args.low_vram and text_enc is not None:
+        _offload(text_enc)
 
     print("[5/5] latent stats + sampler ...")
     latent_mean = latent_std = latent_unwhiten = None
@@ -451,11 +473,16 @@ def main():
     saved = 0
     global_idx = 0
     for p_idx, prompt in enumerate(prompts):
+        if text_enc is not None:
+            _to_dev(text_enc)
         with torch.no_grad(), torch.amp.autocast(**ac):
             text_emb = (_encode_tokens(text_enc, [prompt], device, dtype)
                         if text_enc is not None else None)
+        if text_enc is not None:
+            _offload(text_enc)
         for img_i in range(args.num_images):
             torch.manual_seed(args.seed + global_idx)
+            _to_dev(dit)
             with torch.no_grad(), torch.amp.autocast(**ac):
                 z = sample_v4_euler(
                     dit, z_ref_clean=None, total_view=1, cond_num=0,
@@ -467,8 +494,11 @@ def main():
                     noise_shape=(in_ch, latent_h, latent_w),
                     device=device, dtype=torch.float32, prediction=prediction,
                 )
-                if latent_mean is not None:
-                    z = _denorm_latent(z, latent_mean, latent_std, latent_unwhiten)
+            _offload(dit)
+            if latent_mean is not None:
+                z = _denorm_latent(z, latent_mean, latent_std, latent_unwhiten)
+            _to_dev(codec)
+            with torch.no_grad(), torch.amp.autocast(**ac):
                 rgb = codec.decode_rgb(z.to(dtype), num_views=z.shape[0]).float()
             if tuple(rgb.shape[-2:]) != (H, W):
                 raise RuntimeError(f"decoder produced {tuple(rgb.shape[-2:])}, "
@@ -479,6 +509,7 @@ def main():
             Image.fromarray(arr).save(out_dir / fname)
             if rae is not None:
                 stem = Path(fname).stem
+                _to_dev(rae)
                 try:
                     _save_t2i_geometry(
                         z, rgb01, stem, out_dir, codec, rae, H, W, device,
@@ -487,6 +518,8 @@ def main():
                     )
                 except Exception as exc:
                     print(f"    [WARN] geometry failed for {fname}: {exc}")
+                _offload(rae)
+            _offload(codec)
             saved += 1
             global_idx += 1
         print(f"  [{p_idx + 1}/{len(prompts)}] {prompt[:60]}  saved={saved}")

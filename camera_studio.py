@@ -304,7 +304,7 @@ def prepare_direct_camera(image, token, request: gr.Request):
     return scene, state
 
 
-def generate_direct_camera(image, prompt, _trajectory, views, steps, cfg, seed, stride, payload, scene):
+def generate_direct_camera(image, prompt, _trajectory, views, steps, cfg, seed, stride, payload, scene, low_vram=True):
     from scripts.demo.direct_camera import image_key, end_view_poses
     import numpy as np
     if not image or not scene or image_key(image) != scene.get("imageKey"):
@@ -321,7 +321,7 @@ def generate_direct_camera(image, prompt, _trajectory, views, steps, cfg, seed, 
              requested_camera=payload if isinstance(payload, str) else json.dumps(payload))
     # Existing generator handles the same fixed poses for resident and CLI routes.
     yield from generate_i2v(scene.get("preparedImage", image), (prompt or "").strip() or "A detailed view of the scene shown in the input image.", "example", views, steps, cfg, seed, stride,
-                           camera_pose_file=str(path))
+                           camera_pose_file=str(path), low_vram=low_vram)
 
 def _run(command: list[str], output_dir: Path, timeout: int) -> tuple[str, float]:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -409,6 +409,7 @@ def generate_i2v(
     seed: int,
     pc_stride: int,
     camera_pose_file: str | None = None,
+    low_vram: bool = True,
 ):
     if not image:
         raise gr.Error("Upload an image first.")
@@ -434,6 +435,7 @@ def generate_i2v(
         "--pc-stride", str(int(pc_stride)),
         "--no-pointcloud", "--preview-geometry",
     ]
+    command.append("--low-vram" if low_vram else "--no-low-vram")
     if os.environ.get("GAE_PREVIEW_RGB_DEVICE"):
         command += ["--preview-rgb-device", os.environ["GAE_PREVIEW_RGB_DEVICE"]]
     # Bundled scene examples use their matching poses. Synthetic alternatives
@@ -713,6 +715,7 @@ Choose an image, place your cameras, and generate a scene in motion.
                             with gr.Row():
                                 i2v_seed = gr.Number(label="Seed", value=42, precision=0)
                                 i2v_stride = gr.Slider(label="3D preview sampling stride", minimum=1, maximum=8, step=1, value=2)
+                                i2v_low_vram = gr.Checkbox(label="Low VRAM mode (sequential offload)", value=True)
                         if I2V_EXAMPLES:
                             with gr.Accordion("Try an example", open=False):
                                 scene_gallery = gr.Gallery(
@@ -771,7 +774,7 @@ Choose an image, place your cameras, and generate a scene in motion.
                         "args[8] = window.gaeCameraEditor ? window.gaeCameraEditor.serialize() : '';\n"
                         "    const metric = document.getElementById('gae-client-latency');", 1),
                     inputs=[i2v_image, i2v_prompt, i2v_trajectory, i2v_views, i2v_steps, i2v_cfg, i2v_seed, i2v_stride,
-                            i2v_camera_payload, i2v_camera_scene],
+                            i2v_camera_payload, i2v_camera_scene, i2v_low_vram],
                     outputs=[i2v_video, i2v_depth_video, i2v_path, i2v_depth, i2v_cloud, i2v_status, i2v_progressive, i2v_geometry],
                 )
                 generation.failure(None, js="""() => {
