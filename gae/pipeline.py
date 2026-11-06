@@ -285,12 +285,16 @@ class GAE(nn.Module):
     def standardize(self, z: torch.Tensor) -> torch.Tensor:
         if self.latent_mean is None:
             return z
-        return (z - self.latent_mean) / (self.latent_std + 1e-6)
+        mean = self.latent_mean.to(device=z.device, dtype=z.dtype)
+        std = self.latent_std.to(device=z.device, dtype=z.dtype)
+        return (z - mean) / (std + 1e-6)
 
     def destandardize(self, z_bar: torch.Tensor) -> torch.Tensor:
         if self.latent_mean is None:
             return z_bar
-        return z_bar * (self.latent_std + 1e-6) + self.latent_mean
+        mean = self.latent_mean.to(device=z_bar.device, dtype=z_bar.dtype)
+        std = self.latent_std.to(device=z_bar.device, dtype=z_bar.dtype)
+        return z_bar * (std + 1e-6) + mean
 
     def _configure_sampler(self, flow_cfg: str) -> None:
         """Read the transport / time-shift settings the Euler sampler needs.
@@ -459,24 +463,27 @@ class GAE(nn.Module):
         from eval_generation import sample_v4_euler  # heavy import, done lazily
 
         device = next(self.flow.parameters()).device
-        z_ref_std = self.standardize(z_ref.to(device))
+        flow_dtype = next(self.flow.parameters()).dtype
+        z_ref_std = self.standardize(z_ref.to(device=device, dtype=flow_dtype))
         if seed is not None:
             torch.manual_seed(int(seed))
 
-        z_std = sample_v4_euler(
-            self.flow,
-            z_ref_clean=z_ref_std,
-            total_view=total_views,
-            cond_num=cond_num,
-            plucker_6d=plucker_6d,
-            ref_global=ref_global,
-            cfg_uncond_ref_global=cfg_uncond_ref_global,
-            num_steps=num_steps,
-            cfg_scale=cfg_scale,
-            guidance_mode=guidance_mode,
-            time_dist_shift=getattr(self, "_time_dist_shift", None) or 1.0,
-            prediction=getattr(self, "_prediction", "x"),
-        )
+        use_amp = device.type == "cuda" and (flow_dtype in (torch.float16, torch.bfloat16))
+        with torch.amp.autocast(device_type=device.type, enabled=use_amp, dtype=flow_dtype if use_amp else None):
+            z_std = sample_v4_euler(
+                self.flow,
+                z_ref_clean=z_ref_std,
+                total_view=total_views,
+                cond_num=cond_num,
+                plucker_6d=plucker_6d.to(device=device, dtype=flow_dtype) if plucker_6d is not None else None,
+                ref_global=ref_global.to(device=device, dtype=flow_dtype) if ref_global is not None else None,
+                cfg_uncond_ref_global=cfg_uncond_ref_global.to(device=device, dtype=flow_dtype) if cfg_uncond_ref_global is not None else None,
+                num_steps=num_steps,
+                cfg_scale=cfg_scale,
+                guidance_mode=guidance_mode,
+                time_dist_shift=getattr(self, "_time_dist_shift", None) or 1.0,
+                prediction=getattr(self, "_prediction", "x"),
+            )
         return self.destandardize(z_std)
 
     @torch.inference_mode()

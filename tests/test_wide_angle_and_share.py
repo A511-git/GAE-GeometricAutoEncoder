@@ -104,3 +104,36 @@ def test_wide_angle_synthesizer_pose_model_and_memory_logging():
     assert "def _log_memory" in code
     assert "RAM:" in code
 
+
+def test_gaussian_fourier_embedding_mixed_precision():
+    """Verify GaussianFourierEmbedding handles Float timestep with BFloat16 weights without mat1/mat2 dtype error."""
+    import ast
+    import torch
+    import torch.nn as nn
+
+    code = (ROOT / "src" / "stage2" / "models" / "model_utils.py").read_text(encoding="utf-8")
+    tree = ast.parse(code)
+    cls_node = next(
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "GaussianFourierEmbedding"
+    )
+    cls_code = ast.get_source_segment(code, cls_node)
+    local_ns = {"nn": nn, "torch": torch}
+    exec(cls_code, local_ns)
+    GaussianFourierEmbedding = local_ns["GaussianFourierEmbedding"]
+
+    embedder = GaussianFourierEmbedding(hidden_size=64, embedding_size=32)
+    embedder = embedder.to(dtype=torch.bfloat16)
+
+    # 1. t is float32, embedder is bfloat16 (The exact failure case from Kaggle)
+    t_float = torch.tensor([0.25, 0.5, 0.75], dtype=torch.float32)
+    out = embedder(t_float)
+    assert out.shape == (3, 64)
+    assert out.dtype == torch.bfloat16
+
+    # 2. t is bfloat16, embedder is bfloat16
+    t_bf16 = torch.tensor([0.25, 0.5, 0.75], dtype=torch.bfloat16)
+    out_bf16 = embedder(t_bf16)
+    assert out_bf16.shape == (3, 64)
+    assert out_bf16.dtype == torch.bfloat16
+

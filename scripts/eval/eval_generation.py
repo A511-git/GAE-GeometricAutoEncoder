@@ -2092,7 +2092,7 @@ def sample_v3_euler(
         else:
             z_in = torch.cat([z_ref, z_tgt], dim=0)
 
-        t_tensor = torch.full((total_view,), t_cur, device=device)
+        t_tensor = torch.full((total_view,), t_cur, device=device, dtype=dtype)
 
         in_interval = cfg_interval[0] <= t_cur <= cfg_interval[1]
         use_cfg = guidance_mode in ("cfg", "cfg_ig")
@@ -2494,7 +2494,7 @@ def sample_v4_euler(
         t_next = timestep_values[step + 1]
         dt = t_next - t_cur
 
-        t_tensor = torch.full((total_view,), t_cur, device=device)
+        t_tensor = torch.full((total_view,), t_cur, device=device, dtype=dtype)
         model_z_ref_clean = z_ref_clean
         if state_v3 and cond_num > 0:
             z[:cond_num] = z_ref_clean

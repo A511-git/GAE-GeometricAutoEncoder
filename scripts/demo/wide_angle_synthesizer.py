@@ -585,25 +585,29 @@ def run_pipeline(args: argparse.Namespace) -> int:
         all_K, all_c2w, height, width, patches_y=plucker_h, patches_x=plucker_w,
         device=device, origin_idx=pose_origin_idx,
         translation_norm=pose_translation_norm, pose_scale=None,
-    )
+    ).to(dtype=_DTYPES[args.flow_precision])
 
     flow = _cast(load_flow(str(args.config), str(args.flow_ckpt), device), args.flow_precision)
     model.flow = flow
     model._configure_sampler(str(args.config))
 
+    flow_dtype = _DTYPES[args.flow_precision]
+    use_amp = device.type == "cuda" and (flow_dtype in (torch.float16, torch.bfloat16))
+
     _log_memory("Before Stage 4 Sampling (Flow DiT on GPU)")
     with torch.inference_mode():
-        z_out = model.sample(
-            z_ref=z_ref.to(_DTYPES[args.flow_precision]),
-            total_views=total_views,
-            cond_num=cond_num,
-            plucker_6d=plucker_6d,
-            ref_global=ref_global,
-            cfg_uncond_ref_global=cfg_null,
-            num_steps=args.sample_steps,
-            cfg_scale=args.cfg_scale,
-            seed=args.seed,
-        )
+        with torch.amp.autocast(device_type=device.type, enabled=use_amp, dtype=flow_dtype if use_amp else None):
+            z_out = model.sample(
+                z_ref=z_ref.to(flow_dtype),
+                total_views=total_views,
+                cond_num=cond_num,
+                plucker_6d=plucker_6d,
+                ref_global=ref_global.to(flow_dtype) if ref_global is not None else None,
+                cfg_uncond_ref_global=cfg_null.to(flow_dtype) if cfg_null is not None else None,
+                num_steps=args.sample_steps,
+                cfg_scale=args.cfg_scale,
+                seed=args.seed,
+            )
 
     model.flow = None
     _free(flow, stage="Flow DiT Model")

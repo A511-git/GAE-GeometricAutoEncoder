@@ -705,10 +705,11 @@ class GaussianFourierEmbedding(nn.Module):
     def forward(self, t):
         with torch.no_grad():
             W = self.W # stop gradient manually
+        target_dtype = self.mlp[0].weight.dtype
         t = t[:, None] * W[None, :] * 2 * torch.pi
         # Concatenate sine and cosine transformations
-        t_embed =  torch.cat([torch.sin(t), torch.cos(t)], dim=-1)
-        t_embed = self.mlp(t_embed)
+        t_embed = torch.cat([torch.sin(t), torch.cos(t)], dim=-1)
+        t_embed = self.mlp(t_embed.to(dtype=target_dtype))
         return t_embed
 
 
