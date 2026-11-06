@@ -48,7 +48,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default="all",
         help="Which group of files to fetch (default: all).",
     )
-    ap.add_argument("--out-dir", default="ckpts", help="Destination directory.")
+    ap.add_argument(
+        "--checkpoint-dir", "--ckpt-dir", "--out-dir",
+        default=None,
+        dest="out_dir",
+        help="Destination directory where models are saved/cached.",
+    )
     ap.add_argument("--list", action="store_true", help="Print the manifest and exit.")
     return ap.parse_args(argv)
 

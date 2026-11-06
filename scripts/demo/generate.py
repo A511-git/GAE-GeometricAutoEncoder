@@ -47,8 +47,9 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument(
         "--hf-repo", default=None,
         help="Hugging Face repo id (default env GAE_HF_REPO or TencentARC/GAE-D64-1B). "
-             "Downloads codec + flow into --ckpt-dir when local files are missing.")
-    parser.add_argument("--ckpt-dir", type=Path, default=ROOT / "ckpts")
+             "Downloads codec + flow into --checkpoint-dir when local files are missing.")
+    parser.add_argument("--checkpoint-dir", "--ckpt-dir", type=Path, default=None, dest="checkpoint_dir",
+                        help="Directory where model checkpoints are saved/cached.")
     parser.add_argument("--flow-ckpt", type=Path, default=None)
     parser.add_argument("--codec-ckpt", type=Path, default=None)
     parser.add_argument("--config", type=Path, default=ROOT / "configs/flow_gae64.yaml")
@@ -126,10 +127,17 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
             args.prompt = args.prompt_file.read_text().strip()
         if not args.prompt:
             raise SystemExit("Provide a prompt via --prompt or --prompt-file.")
+    from gae.hub import resolve_checkpoint_dir, resolve_model_file
+    args.checkpoint_dir = resolve_checkpoint_dir(args.checkpoint_dir)
+    args.ckpt_dir = args.checkpoint_dir
+    if args.codec_ckpt is not None:
+        args.codec_ckpt = resolve_model_file(args.codec_ckpt, args.checkpoint_dir)
+    if args.flow_ckpt is not None:
+        args.flow_ckpt = resolve_model_file(args.flow_ckpt, args.checkpoint_dir)
     if args.hf_repo or args.flow_ckpt is None or args.codec_ckpt is None:
         from gae.hub import DEFAULT_REPO, download_weights, extract_da3_stats
         repo = args.hf_repo or os.environ.get("GAE_HF_REPO") or DEFAULT_REPO
-        paths = download_weights(repo, size="64", out_dir=args.ckpt_dir)
+        paths = download_weights(repo, size="64", out_dir=args.checkpoint_dir)
         tar = paths.get("da3_stats_giant_5ds.tar")
         if tar is not None:
             extract_da3_stats(tar, ROOT / "model_stats" / "da3_giant_5ds")
@@ -340,6 +348,7 @@ def _prepare_scene(
 def _launch_eval(args: argparse.Namespace, extra: list[str], manifest: Path, env: dict, num_scenes: int) -> int:
     command = [
         sys.executable, str(ROOT / "scripts/eval/eval_generation.py"),
+        "--checkpoint-dir", str(args.checkpoint_dir),
         "--dit-ckpt", str(args.flow_ckpt),
         "--vae-ckpt", str(args.codec_ckpt),
         "--gld-config", str(args.codec_config),

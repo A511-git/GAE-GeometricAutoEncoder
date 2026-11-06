@@ -352,7 +352,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--save-pointcloud", action="store_true", default=True, help="Export .ply 3D point cloud.")
     parser.add_argument("--hf-repo", default=None, help="Hugging Face repo id.")
-    parser.add_argument("--ckpt-dir", type=Path, default=ROOT / "ckpts")
+    parser.add_argument("--checkpoint-dir", "--ckpt-dir", type=Path, default=None, dest="checkpoint_dir",
+                        help="Directory where model checkpoints are saved/cached.")
     parser.add_argument("--flow-ckpt", type=Path, default=None)
     parser.add_argument("--codec-ckpt", type=Path, default=None)
     parser.add_argument("--config", type=Path, default=ROOT / "configs/flow_gae64.yaml")
@@ -384,6 +385,14 @@ def parse_args() -> argparse.Namespace:
     # Auto-resolve resolution to nearest valid multiples of 14
     args.resolution = resolve_resolution(args.resolution[0], args.resolution[1])
 
+    from gae.hub import resolve_checkpoint_dir, resolve_model_file
+    args.checkpoint_dir = resolve_checkpoint_dir(args.checkpoint_dir)
+    args.ckpt_dir = args.checkpoint_dir
+    if args.codec_ckpt is not None:
+        args.codec_ckpt = resolve_model_file(args.codec_ckpt, args.checkpoint_dir)
+    if args.flow_ckpt is not None:
+        args.flow_ckpt = resolve_model_file(args.flow_ckpt, args.checkpoint_dir)
+
     return args
 
 
@@ -392,7 +401,7 @@ def _download_checkpoints(args: argparse.Namespace) -> None:
         from gae.hub import DEFAULT_REPO, download_weights, extract_da3_stats
         repo = args.hf_repo or os.environ.get("GAE_HF_REPO") or DEFAULT_REPO
         print(f"[WideSynthesizer] Verifying weights from '{repo}'...")
-        paths = download_weights(repo, size="64", out_dir=args.ckpt_dir)
+        paths = download_weights(repo, size="64", out_dir=args.checkpoint_dir)
         tar = paths.get("da3_stats_giant_5ds.tar")
         if tar is not None:
             extract_da3_stats(tar, ROOT / "model_stats" / "da3_giant_5ds")
@@ -484,7 +493,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
     stats_path = flow_cfg.get("latent_stats")
     latent_mean = latent_std = None
     if stats_path:
-        resolved = _resolve_path(str(stats_path))
+        resolved = _resolve_path(str(stats_path), args.checkpoint_dir)
         if resolved.is_file():
             latent_mean, latent_std = _read_latent_stats(str(resolved))
 

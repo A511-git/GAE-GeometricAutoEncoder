@@ -109,8 +109,9 @@ PLAYBACK_TIMING_JS = r"""(...args) => {
 
 HF_REPO = os.environ.get("GAE_HF_REPO", "TencentARC/GAE-D64-1B")
 # Same directory the resident engine loads from, so side jobs never re-download.
-CKPT_DIR = Path(
-    os.environ.get("GAE_SPACE_CKPT_DIR") or os.environ.get("GAE_CKPT_DIR") or str(ROOT / "ckpts")
+from gae.hub import resolve_checkpoint_dir
+CKPT_DIR = resolve_checkpoint_dir(
+    os.environ.get("GAE_CHECKPOINT_DIR") or os.environ.get("GAE_SPACE_CKPT_DIR") or os.environ.get("GAE_CKPT_DIR")
 )
 OUTPUT_ROOT = Path(os.environ.get("GAE_SPACE_OUTPUT_DIR", "/tmp/gae-space-results"))
 
@@ -870,10 +871,17 @@ def main() -> None:
                         help="Port to bind (default: 7860)")
     parser.add_argument("--share", action="store_true", default=False,
                         help="Create a public Gradio share link (.gradio.live)")
+    parser.add_argument("--checkpoint-dir", "--ckpt-dir", type=str, default=None, dest="checkpoint_dir",
+                        help="Directory where model checkpoints are saved/cached.")
     args = parser.parse_args()
 
+    global CKPT_DIR
+    if args.checkpoint_dir:
+        from gae.hub import resolve_checkpoint_dir
+        CKPT_DIR = resolve_checkpoint_dir(args.checkpoint_dir)
+
     should_share = args.share or os.environ.get("GRADIO_SHARE", "0") in ("1", "true", "True")
-    print(f"[Camera Studio] Launching UI on {args.host}:{args.port} (share={should_share})...")
+    print(f"[Camera Studio] Launching UI on {args.host}:{args.port} (share={should_share}, ckpt_dir={CKPT_DIR})...")
 
     allowed = [
         str(OUTPUT_ROOT),

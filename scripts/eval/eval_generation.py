@@ -1265,7 +1265,10 @@ def _sync_staged_output(stage_dir: str | None, final_dir: str) -> None:
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--dit-ckpt", type=str, required=True)
+    p.add_argument("--checkpoint-dir", "--ckpt-dir", type=str, default=None, dest="checkpoint_dir",
+                   help="Directory where model checkpoints are stored/cached.")
+    p.add_argument("--dit-ckpt", type=str, default=None,
+                   help="Path to DiT flow checkpoint (defaults to <checkpoint-dir>/flow_gae64.pt).")
     p.add_argument("--vae-ckpt", type=str, default=None,
                    help="Override yaml vae_checkpoint (e.g. temporal RGBHead ckpt).")
     p.add_argument("--gld-config", type=str, default=None,
@@ -1431,7 +1434,16 @@ def parse_args():
                    default="google/umt5-base",
                    help="UMT5 tokenizer path")
     p.add_argument("--text-max-length", type=int, default=226)
-    return p.parse_args()
+    args = p.parse_args()
+    from gae.hub import resolve_checkpoint_dir, resolve_model_file
+    args.checkpoint_dir = resolve_checkpoint_dir(args.checkpoint_dir)
+    if not args.dit_ckpt:
+        args.dit_ckpt = str(resolve_model_file("flow_gae64.pt", args.checkpoint_dir))
+    else:
+        args.dit_ckpt = str(resolve_model_file(args.dit_ckpt, args.checkpoint_dir))
+    if args.vae_ckpt:
+        args.vae_ckpt = str(resolve_model_file(args.vae_ckpt, args.checkpoint_dir))
+    return args
 
 
 # ── V3 inference inputs (simplified — no z_cond) ─────────────────────────
@@ -3249,7 +3261,9 @@ def main():
             # propagation through DA3 attention blocks followed by DPT decode.
             # Time the complete path rather than only the final DPT head.
             vae.decode_depth = _timed(vae.decode_depth, "rgb_geometry_decode")
-        rgb_ckpt = str(args.vae_ckpt or cfg.get("da3_direct_rgb_checkpoint", "") or "")
+        from gae.hub import resolve_model_file
+        rgb_raw = args.vae_ckpt or cfg.get("da3_direct_rgb_checkpoint", "") or ""
+        rgb_ckpt = str(resolve_model_file(rgb_raw, getattr(args, "checkpoint_dir", None)) if rgb_raw else "")
         rgb_ckpt_local = _cache_file(rgb_ckpt) if rgb_ckpt else ""
         if rgb_ckpt_local and os.path.isfile(rgb_ckpt_local):
             state = _fast_load(rgb_ckpt_local, map_location="cpu")
@@ -3305,7 +3319,8 @@ def main():
 
         # ── 2. VAE ──
         print("[2/4] Loading Feature VAE v2 ...")
-        vae_ckpt_path = str(args.vae_ckpt or cfg.get("vae_checkpoint"))
+        from gae.hub import resolve_model_file
+        vae_ckpt_path = str(resolve_model_file(args.vae_ckpt or cfg.get("vae_checkpoint"), getattr(args, "checkpoint_dir", None)))
         print(f"  vae ckpt: {vae_ckpt_path}")
         vae_ckpt = _fast_load(vae_ckpt_path, map_location="cpu")
         vae_sd = _unwrap_codec_state(vae_ckpt)
@@ -3436,7 +3451,9 @@ def main():
         transport = create_transport(**transport_cfg, time_dist_shift=time_dist_shift)
 
     latent_mean, latent_std, latent_whiten, latent_unwhiten = None, None, None, None
-    stats_path = str(cfg.get("latent_stats", ""))
+    from gae.hub import resolve_model_file
+    stats_raw = cfg.get("latent_stats", "")
+    stats_path = str(resolve_model_file(stats_raw, getattr(args, "checkpoint_dir", None)) if stats_raw else "")
     if latent_backend == "da3_direct" and stats_path:
         print("  [da3_direct] ignoring framework latent_stats; codec self-normalizes")
     elif stats_path and os.path.isfile(stats_path):

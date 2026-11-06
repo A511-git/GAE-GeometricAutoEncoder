@@ -83,9 +83,10 @@ def parse_args():
     p.add_argument(
         "--hf-repo", default=None,
         help="Hugging Face repo id (default env GAE_HF_REPO or TencentARC/GAE-D64-1B). "
-             "Downloads codec + flow into --ckpt-dir when local files are missing.",
+             "Downloads codec + flow into --checkpoint-dir when local files are missing.",
     )
-    p.add_argument("--ckpt-dir", type=str, default=str(_ROOT / "ckpts"))
+    p.add_argument("--checkpoint-dir", "--ckpt-dir", type=str, default=None, dest="checkpoint_dir",
+                   help="Directory where model checkpoints are saved/cached.")
     p.add_argument("--flow-ckpt", type=str, default=None,
                    help="Stage 2 flow checkpoint. Default: download from --hf-repo.")
     p.add_argument("--codec-ckpt", type=str, default=None,
@@ -130,7 +131,15 @@ def parse_args():
                    help="Disable low VRAM mode and keep all models concurrently in GPU memory.")
     p.add_argument("--pc-stride", type=int, default=4,
                    help="Subsample stride for the T2I point cloud.")
-    return p.parse_args()
+    args = p.parse_args()
+    from gae.hub import resolve_checkpoint_dir, resolve_model_file
+    args.checkpoint_dir = resolve_checkpoint_dir(args.checkpoint_dir)
+    args.ckpt_dir = args.checkpoint_dir
+    if args.codec_ckpt is not None:
+        args.codec_ckpt = str(resolve_model_file(args.codec_ckpt, args.checkpoint_dir))
+    if args.flow_ckpt is not None:
+        args.flow_ckpt = str(resolve_model_file(args.flow_ckpt, args.checkpoint_dir))
+    return args
 
 
 def _resolve_hub_weights(args) -> None:
@@ -138,7 +147,7 @@ def _resolve_hub_weights(args) -> None:
         return
     from gae.hub import DEFAULT_REPO, download_weights, extract_da3_stats
     repo = args.hf_repo or os.environ.get("GAE_HF_REPO") or DEFAULT_REPO
-    paths = download_weights(repo, size="64", out_dir=args.ckpt_dir)
+    paths = download_weights(repo, size="64", out_dir=args.checkpoint_dir)
     tar = paths.get("da3_stats_giant_5ds.tar")
     if tar is not None:
         extract_da3_stats(tar, _ROOT / "model_stats" / "da3_giant_5ds")
@@ -435,9 +444,10 @@ def main():
 
     print("[5/5] latent stats + sampler ...")
     latent_mean = latent_std = latent_unwhiten = None
-    stats_path = str(cfg.get("latent_stats", "")).strip()
-    if stats_path and not os.path.isabs(stats_path):
-        stats_path = str(_ROOT / stats_path)
+    from gae.hub import resolve_model_file
+    stats_raw = str(cfg.get("latent_stats", "")).strip()
+    stats_file = resolve_model_file(stats_raw, getattr(args, "checkpoint_dir", None)) if stats_raw else None
+    stats_path = str(stats_file) if (stats_file and stats_file.is_file()) else ""
     if stats_path and os.path.isfile(stats_path):
         stats = _fast_load(stats_path, map_location="cpu")
         latent_mean = stats["mean"].float().to(device).reshape(1, -1, 1, 1)

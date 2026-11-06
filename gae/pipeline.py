@@ -68,7 +68,11 @@ def _unwrap_state(state, keys: Tuple[str, ...]):
     return state
 
 
-def _resolve_path(path: str) -> Path:
+def _resolve_path(path: str, checkpoint_dir: Optional[Union[str, Path]] = None) -> Path:
+    from .hub import resolve_model_file
+    resolved = resolve_model_file(path, checkpoint_dir)
+    if resolved is not None and resolved.is_file():
+        return resolved
     p = Path(path)
     if not p.is_absolute():
         p = _REPO_ROOT / p
@@ -214,10 +218,10 @@ class GAE(nn.Module):
         Downloads codec / flow / latent-stats / DA3 stats into ``cache_dir``
         (default ``ckpts/``) and loads them with the in-repo yaml configs.
         """
-        from .hub import DEFAULT_REPO, download_weights, extract_da3_stats
+        from .hub import DEFAULT_REPO, download_weights, extract_da3_stats, resolve_checkpoint_dir
 
         repo = repo_id or DEFAULT_REPO
-        out = Path(cache_dir) if cache_dir is not None else _REPO_ROOT / "ckpts"
+        out = resolve_checkpoint_dir(cache_dir)
         paths = download_weights(repo, size=str(size), out_dir=out)
         tar = paths.get("da3_stats_giant_5ds.tar")
         if tar is not None:
@@ -234,6 +238,7 @@ class GAE(nn.Module):
             flow_cfg=flow_cfg,
             flow_ckpt=flow_ckpt,
             latent_stats=str(stats) if stats is not None else None,
+            checkpoint_dir=out,
             device=device,
         )
 
@@ -245,9 +250,16 @@ class GAE(nn.Module):
         flow_cfg: Optional[str] = None,
         flow_ckpt: Optional[str] = None,
         latent_stats: Optional[str] = None,
+        checkpoint_dir: Optional[Union[str, Path]] = None,
         device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
     ) -> "GAE":
         """Build a :class:`GAE` from config paths, loading weights if given."""
+        from .hub import resolve_model_file
+        if codec_ckpt is not None:
+            codec_ckpt = str(resolve_model_file(codec_ckpt, checkpoint_dir) or codec_ckpt)
+        if flow_ckpt is not None:
+            flow_ckpt = str(resolve_model_file(flow_ckpt, checkpoint_dir) or flow_ckpt)
+
         backbone = load_backbone(flow_cfg or codec_cfg, device)
         codec = load_codec(codec_cfg, codec_ckpt, device)
 
@@ -259,7 +271,7 @@ class GAE(nn.Module):
         stats_src = OmegaConf.load(flow_cfg or codec_cfg)
         stats_path = latent_stats or stats_src.get("latent_stats")
         if stats_path:
-            resolved = _resolve_path(str(stats_path))
+            resolved = _resolve_path(str(stats_path), checkpoint_dir)
             if resolved.is_file():
                 latent_mean, latent_std = _read_latent_stats(str(resolved))
             else:

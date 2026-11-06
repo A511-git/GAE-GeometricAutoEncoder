@@ -34,8 +34,29 @@ The underlying modules stay importable directly for training and research:
 * ``src.metrics`` — latent and image diagnostics
 """
 
-from .hub import DEFAULT_REPO, download_weights
-from .pipeline import GAE, load_backbone, load_codec, load_flow
+from .hub import DEFAULT_REPO, download_weights, resolve_checkpoint_dir, resolve_model_file
 
 __version__ = "0.1.0"
-__all__ = ["GAE", "DEFAULT_REPO", "download_weights", "load_codec", "load_backbone", "load_flow", "__version__"]
+__all__ = [
+    "GAE",
+    "DEFAULT_REPO",
+    "download_weights",
+    "resolve_checkpoint_dir",
+    "resolve_model_file",
+    "load_codec",
+    "load_backbone",
+    "load_flow",
+    "__version__",
+]
+
+
+def __getattr__(name: str):
+    if name in ("GAE", "load_backbone", "load_codec", "load_flow"):
+        from .pipeline import GAE, load_backbone, load_codec, load_flow
+
+        globals()["GAE"] = GAE
+        globals()["load_backbone"] = load_backbone
+        globals()["load_codec"] = load_codec
+        globals()["load_flow"] = load_flow
+        return globals()[name]
+    raise AttributeError(f"module 'gae' has no attribute {name!r}")
