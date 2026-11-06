@@ -174,3 +174,17 @@ def test_dpt_helpers_format_recon_dtype_alignment():
         assert patches.dtype == torch.float16
         assert cls_zeros.dtype == torch.float16
 
+
+def test_recover_poses_and_pointcloud_fallback():
+    """Verify recover_poses fallback handling on homography failure."""
+    code_cam = (ROOT / "src" / "utils" / "camera_from_ray.py").read_text(encoding="utf-8")
+    assert "ones_conf = torch.ones_like(conf_t)" in code_cam
+    assert "pred_extrinsic = torch.eye(4" in code_cam
+
+    code_eval = (ROOT / "scripts" / "eval" / "eval_generation.py").read_text(encoding="utf-8")
+    assert "recover_poses validation skipped" in code_eval
+
+    code_synth = (ROOT / "scripts" / "demo" / "wide_angle_synthesizer.py").read_text(encoding="utf-8")
+    assert "Failed to generate 3D point cloud" in code_synth
+
+

@@ -671,9 +671,12 @@ def run_pipeline(args: argparse.Namespace) -> int:
 
     # Also save 3D Point Cloud (.ply) if requested
     if args.save_pointcloud:
-        out = {"rgb": rgb, **geo}
-        _ = model.save_outputs(out, args.output, stem="000", pc_stride=4)
-        print(f"      3D Scene Point Cloud saved: {args.output / '000_pred_pointcloud.ply'}")
+        try:
+            out = {"rgb": rgb, **geo}
+            _ = model.save_outputs(out, args.output, stem="000", pc_stride=4)
+            print(f"      3D Scene Point Cloud saved: {args.output / '000_pred_pointcloud.ply'}")
+        except Exception as e:
+            print(f"[Warning] Failed to generate 3D point cloud: {e}")
 
     _free(codec, stage="Codec")
     del backbone_norm, backbone

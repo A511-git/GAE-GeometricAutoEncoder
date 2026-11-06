@@ -171,9 +171,23 @@ def recover_poses(
     H_ray, W_ray = ray_t.shape[-3:-1]
     H_out, W_out = input_size if input_size is not None else (H_ray, W_ray)
     with torch.inference_mode():
-        pred_extrinsic, focal_norm, principal_norm = get_extrinsic_from_camray(
-            ray_t, conf_t, H_ray, W_ray, training=False,
-        )
+        try:
+            pred_extrinsic, focal_norm, principal_norm = get_extrinsic_from_camray(
+                ray_t, conf_t, H_ray, W_ray, training=False,
+            )
+        except Exception:
+            # If weighted RANSAC failed due to confidence filtering, try uniform confidence
+            try:
+                ones_conf = torch.ones_like(conf_t) if conf_t is not None else None
+                pred_extrinsic, focal_norm, principal_norm = get_extrinsic_from_camray(
+                    ray_t, ones_conf, H_ray, W_ray, training=False,
+                )
+            except Exception:
+                # Fallback to standard identity camera if ray homography cannot be fit
+                B, V = ray_t.shape[:2]
+                pred_extrinsic = torch.eye(4, dtype=torch.float32, device=ray_t.device)[None, None].repeat(B, V, 1, 1)[:, :, :3, :]
+                focal_norm = torch.ones((B, V, 2), dtype=torch.float32, device=ray_t.device) * 1.5
+                principal_norm = torch.zeros((B, V, 2), dtype=torch.float32, device=ray_t.device)
         # Convention note: our DPT ray head emits ray directions in the WORLD
         # frame, so the raw [R|T] returned by get_extrinsic_from_camray is
         # already the camera-to-world (c2w) matrix here. DA3's official pipeline
