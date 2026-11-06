@@ -444,6 +444,25 @@ def run_pipeline(args: argparse.Namespace) -> int:
     args.output.mkdir(parents=True, exist_ok=True)
     height, width = args.resolution
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Detect GPUs lacking native hardware BF16 (e.g. SM < 8.0 such as Tesla T4 / Turing)
+    is_bf16_ok = True
+    if device.type == "cuda":
+        if hasattr(torch.cuda, "is_bf16_supported"):
+            is_bf16_ok = torch.cuda.is_bf16_supported()
+        else:
+            major, _ = torch.cuda.get_device_capability(device)
+            is_bf16_ok = (major >= 8)
+
+    if not is_bf16_ok:
+        device_name = torch.cuda.get_device_name(device) if device.type == "cuda" else "Device"
+        cap = torch.cuda.get_device_capability(device) if device.type == "cuda" else (0, 0)
+        print(f"[Precision] GPU {device_name} (compute capability {cap[0]}.{cap[1]} < 8.0) does not support native BF16.", flush=True)
+        for attr in ("backbone_precision", "text_precision", "codec_precision", "flow_precision"):
+            if getattr(args, attr, None) == "bf16":
+                setattr(args, attr, "fp16")
+                print(f"[Precision] Auto-fallback {attr}: bf16 -> fp16", flush=True)
+
     _log_memory("Pipeline Start")
 
     N = len(args.collected_images)

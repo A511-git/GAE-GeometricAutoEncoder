@@ -314,6 +314,7 @@ class PluckerAttention(nn.Module):
 
             # Preferred fast path: FlashAttention v2.
             # Layout: PyTorch SDPA = (B, H, N, D); FA expects (B, N, H, D).
+            attn_computed = False
             if self.attention_backend == "fa3":
                 if self.training or orig_dtype != torch.bfloat16:
                     raise ValueError("The optional FA3 backend is BF16 inference only")
@@ -325,33 +326,49 @@ class PluckerAttention(nn.Module):
                     causal=False, num_splits=1, pack_gqa=False,
                 )
                 x_attn = x_attn.transpose(1, 2)
+                attn_computed = True
             elif FLASH_ATTN_AVAILABLE and orig_dtype in (torch.bfloat16, torch.float16):
-                q = q.permute(0, 2, 1, 3).contiguous()
-                k = k.permute(0, 2, 1, 3).contiguous()
-                v = v.permute(0, 2, 1, 3).contiguous()
-                x_attn = flash_attn_func(
-                    q, k, v,
-                    dropout_p=self.attn_drop.p if self.training else 0.0,
-                )
-                x_attn = x_attn.permute(0, 2, 1, 3)
-            elif XFORMERS_AVAILABLE:
-                q = q.permute(0, 2, 1, 3)
-                k = k.permute(0, 2, 1, 3)
-                v = v.permute(0, 2, 1, 3)
+                try:
+                    q_fa = q.permute(0, 2, 1, 3).contiguous()
+                    k_fa = k.permute(0, 2, 1, 3).contiguous()
+                    v_fa = v.permute(0, 2, 1, 3).contiguous()
+                    x_attn = flash_attn_func(
+                        q_fa, k_fa, v_fa,
+                        dropout_p=self.attn_drop.p if self.training else 0.0,
+                    )
+                    x_attn = x_attn.permute(0, 2, 1, 3)
+                    attn_computed = True
+                except Exception:
+                    attn_computed = False
 
-                if orig_dtype == torch.float32:
-                    q = q.to(torch.bfloat16)
-                    k = k.to(torch.bfloat16)
-                    v = v.to(torch.bfloat16)
+            if not attn_computed and XFORMERS_AVAILABLE:
+                try:
+                    q_xf = q.permute(0, 2, 1, 3)
+                    k_xf = k.permute(0, 2, 1, 3)
+                    v_xf = v.permute(0, 2, 1, 3)
 
-                x_attn = xops.memory_efficient_attention(
-                    q, k, v,
-                    p=self.attn_drop.p if self.training else 0.0,
-                )
-                if x_attn.dtype != orig_dtype:
-                    x_attn = x_attn.to(orig_dtype)
-                x_attn = x_attn.permute(0, 2, 1, 3)
-            else:
+                    if orig_dtype == torch.float32:
+                        target_xf_dtype = (
+                            torch.bfloat16
+                            if (torch.cuda.is_available() and getattr(torch.cuda, "is_bf16_supported", lambda: False)())
+                            else torch.float16
+                        )
+                        q_xf = q_xf.to(target_xf_dtype)
+                        k_xf = k_xf.to(target_xf_dtype)
+                        v_xf = v_xf.to(target_xf_dtype)
+
+                    x_attn = xops.memory_efficient_attention(
+                        q_xf, k_xf, v_xf,
+                        p=self.attn_drop.p if self.training else 0.0,
+                    )
+                    if x_attn.dtype != orig_dtype:
+                        x_attn = x_attn.to(orig_dtype)
+                    x_attn = x_attn.permute(0, 2, 1, 3)
+                    attn_computed = True
+                except (NotImplementedError, RuntimeError, ValueError):
+                    attn_computed = False
+
+            if not attn_computed:
                 x_attn = F.scaled_dot_product_attention(
                     q, k, v,
                     dropout_p=self.attn_drop.p if self.training else 0.0,

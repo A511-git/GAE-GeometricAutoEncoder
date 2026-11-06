@@ -544,33 +544,37 @@ class NormAttention(nn.Module):
                     v_final = torch.cat([v_prefix, v_p], dim=3).reshape(B, self.num_heads, V * N, self.head_dim)
 
                     # 5. Attention
+                    attn_computed = False
                     if XFORMERS_AVAILABLE:
                          # xformers requires (B, S, H, D)
-                        q_final = q_final.permute(0, 2, 1, 3)
-                        k_final = k_final.permute(0, 2, 1, 3)
-                        v_final = v_final.permute(0, 2, 1, 3)
+                        q_xf = q_final.permute(0, 2, 1, 3)
+                        k_xf = k_final.permute(0, 2, 1, 3)
+                        v_xf = v_final.permute(0, 2, 1, 3)
 
-                        # Correctly handle B200 requirements:
-                        # 1. Input must be bfloat16/fp16 for xformers
-                        # 2. Output must be cast back to original dtype to match residual stream/next layers
                         orig_dtype = q_final.dtype
                         if orig_dtype == torch.float32:
-                            q_final = q_final.to(torch.bfloat16)
-                            k_final = k_final.to(torch.bfloat16)
-                            v_final = v_final.to(torch.bfloat16)
+                            target_xf_dtype = (
+                                torch.bfloat16
+                                if (torch.cuda.is_available() and getattr(torch.cuda, "is_bf16_supported", lambda: False)())
+                                else torch.float16
+                            )
+                            q_xf = q_xf.to(target_xf_dtype)
+                            k_xf = k_xf.to(target_xf_dtype)
+                            v_xf = v_xf.to(target_xf_dtype)
 
-                        x = xops.memory_efficient_attention(
-                            q_final, k_final, v_final,
-                            p=self.attn_drop.p if self.training else 0.,
-                        )
+                        try:
+                            x = xops.memory_efficient_attention(
+                                q_xf, k_xf, v_xf,
+                                p=self.attn_drop.p if self.training else 0.,
+                            )
+                            if x.dtype != orig_dtype:
+                                x = x.to(orig_dtype)
+                            x = x.permute(0, 2, 1, 3)
+                            attn_computed = True
+                        except (NotImplementedError, RuntimeError, ValueError):
+                            attn_computed = False
 
-                        # Restore dtype if we changed it
-                        if x.dtype != orig_dtype:
-                            x = x.to(orig_dtype)
-
-                        # Back to (B, H, S, D)
-                        x = x.permute(0, 2, 1, 3)
-                    else:
+                    if not attn_computed:
                         x = F.scaled_dot_product_attention(
                             q_final, k_final, v_final,
                             dropout_p=self.attn_drop.p if self.training else 0.,
@@ -606,31 +610,37 @@ class NormAttention(nn.Module):
                         dropout_p=self.attn_drop.p if self.training else 0.,
                     )
             else:
+                attn_computed = False
                 if XFORMERS_AVAILABLE:
                     # xformers requires (B, S, H, D)
-                    q = q.permute(0, 2, 1, 3)
-                    k = k.permute(0, 2, 1, 3)
-                    v = v.permute(0, 2, 1, 3)
-                    
-                    # Correctly handle B200 requirements
+                    q_xf = q.permute(0, 2, 1, 3)
+                    k_xf = k.permute(0, 2, 1, 3)
+                    v_xf = v.permute(0, 2, 1, 3)
+
                     orig_dtype = q.dtype
                     if orig_dtype == torch.float32:
-                        q = q.to(torch.bfloat16)
-                        k = k.to(torch.bfloat16)
-                        v = v.to(torch.bfloat16)
-                        
-                    x = xops.memory_efficient_attention(
-                        q, k, v,
-                        p=self.attn_drop.p if self.training else 0.,
-                    )
+                        target_xf_dtype = (
+                            torch.bfloat16
+                            if (torch.cuda.is_available() and getattr(torch.cuda, "is_bf16_supported", lambda: False)())
+                            else torch.float16
+                        )
+                        q_xf = q_xf.to(target_xf_dtype)
+                        k_xf = k_xf.to(target_xf_dtype)
+                        v_xf = v_xf.to(target_xf_dtype)
 
-                    # Restore dtype if we changed it
-                    if x.dtype != orig_dtype:
-                        x = x.to(orig_dtype)
+                    try:
+                        x = xops.memory_efficient_attention(
+                            q_xf, k_xf, v_xf,
+                            p=self.attn_drop.p if self.training else 0.,
+                        )
+                        if x.dtype != orig_dtype:
+                            x = x.to(orig_dtype)
+                        x = x.permute(0, 2, 1, 3)
+                        attn_computed = True
+                    except (NotImplementedError, RuntimeError, ValueError):
+                        attn_computed = False
 
-                    # Back to (B, H, S, D)
-                    x = x.permute(0, 2, 1, 3)
-                else:
+                if not attn_computed:
                     x = F.scaled_dot_product_attention(
                         q, k, v,
                         dropout_p=self.attn_drop.p if self.training else 0.,
