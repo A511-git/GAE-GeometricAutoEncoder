@@ -2866,12 +2866,26 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model_device = torch.device("cpu") if args.low_vram else device
 
-    def _move_to_device(m):
+    try:
+        import psutil
+    except ImportError:
+        psutil = None
+
+    def _mem_str():
+        ram = f"{psutil.Process().memory_info().rss / (1024*1024):.0f}MB" if psutil else "N/A"
+        if torch.cuda.is_available():
+            vram = f"{torch.cuda.memory_allocated() / (1024*1024):.0f}MB alloc, {torch.cuda.memory_reserved() / (1024*1024):.0f}MB res"
+            return f"RAM: {ram} | VRAM: {vram}"
+        return f"RAM: {ram}"
+
+    def _move_to_device(m, tag: str = "module"):
         if m is not None and hasattr(m, "to"):
             m.to(device)
+            if args.low_vram:
+                print(f"[low-vram] Loaded {tag} to {device} ({_mem_str()})", flush=True)
         return m
 
-    def _offload_to_cpu(*modules):
+    def _offload_to_cpu(*modules, tag: str = "module"):
         if not args.low_vram:
             return
         for m in modules:
@@ -2879,6 +2893,7 @@ def main():
                 m.to("cpu")
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        print(f"[low-vram] Offloaded {tag} to CPU ({_mem_str()})", flush=True)
     final_output_dir, staged_output_dir = _maybe_stage_output_dir(args)
     V = args.num_views
     T = args.total_views if args.total_views is not None else V

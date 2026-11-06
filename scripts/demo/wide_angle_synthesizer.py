@@ -51,19 +51,41 @@ for sub in (ROOT / "src", ROOT / "scripts" / "eval", ROOT / "scripts" / "demo", 
     if str(sub) not in sys.path:
         sys.path.insert(0, str(sub))
 
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
 _DTYPES = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
 
 
-def _free(*modules) -> None:
+def _log_memory(stage: str) -> None:
+    """Print real-time system RAM and GPU VRAM usage."""
+    ram_mb = psutil.Process().memory_info().rss / (1024 * 1024) if psutil else 0
+    if torch.cuda.is_available():
+        alloc = torch.cuda.memory_allocated() / (1024 * 1024)
+        res = torch.cuda.memory_reserved() / (1024 * 1024)
+        max_alloc = torch.cuda.max_memory_allocated() / (1024 * 1024)
+        print(f"[{stage}] RAM: {ram_mb:.0f}MB | GPU VRAM: {alloc:.0f}MB alloc, {res:.0f}MB res (peak {max_alloc:.0f}MB)", flush=True)
+    else:
+        print(f"[{stage}] System RAM: {ram_mb:.0f}MB", flush=True)
+
+
+def _free(*modules, stage: str = "") -> None:
     """Drop references and reclaim VRAM immediately."""
     for m in modules:
         if m is not None:
             if hasattr(m, "to"):
-                m.to("cpu")
+                try:
+                    m.to("cpu")
+                except Exception:
+                    pass
             del m
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+    if stage:
+        _log_memory(f"After Offload: {stage}")
 
 
 def _cast(module: torch.nn.Module, precision: str) -> torch.nn.Module:
@@ -80,8 +102,10 @@ def estimate_poses_with_da3(
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """Auto-estimate camera poses (c2w) and intrinsics (K) from raw images using DA3."""
     print(f"\n[Auto-Pose] Loading DA3 pose estimator ({model_id})...")
+    _log_memory("Before Loading DA3 Pose Estimator")
     from depth_anything_3.api import DepthAnything3
     da3 = DepthAnything3.from_pretrained(model_id).to(device).eval()
+    _log_memory("DA3 Pose Estimator Loaded")
 
     print(f"[Auto-Pose] Estimating 3D camera angles across {len(images_pil)} images...")
     with torch.inference_mode():
@@ -107,7 +131,7 @@ def estimate_poses_with_da3(
         c2w_list.append(c2w)
 
     K_list = [K_raw[i].copy() for i in range(len(K_raw))]
-    _free(da3)
+    _free(da3, stage="DA3 Pose Estimator")
     print(f"[Auto-Pose] Solved {len(c2w_list)} camera poses successfully!")
     return c2w_list, K_list
 
@@ -333,6 +357,8 @@ def parse_args() -> argparse.Namespace:
                         help="Directory containing the input images (e.g. 3, 5, or more images).")
     parser.add_argument("--poses", type=Path, default=None,
                         help="Optional pre-existing pose .npz file (if omitted, DA3 auto-estimates).")
+    parser.add_argument("--pose-model", type=str, default="depth-anything/DA3NESTED-GIANT-LARGE-1.1",
+                        help="Depth Anything 3 model id or path for pose estimation (default: depth-anything/DA3NESTED-GIANT-LARGE-1.1).")
     parser.add_argument("--prompt", type=str, default=None,
                         help="Text prompt describing the scene.")
     parser.add_argument("--prompt-file", type=Path, default=None,
@@ -418,6 +444,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
     args.output.mkdir(parents=True, exist_ok=True)
     height, width = args.resolution
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    _log_memory("Pipeline Start")
 
     N = len(args.collected_images)
     print(f"\n=======================================================")
@@ -440,6 +467,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
         pil_images.append(Image.fromarray(cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)))
 
     # ── [1/5] Camera Pose Estimation (Auto-detected or Loaded) ──
+    _log_memory("Before Stage 1 (Camera Poses)")
     if args.poses and args.poses.is_file():
         print(f"\n[1/5] Loading pre-existing poses from: {args.poses}")
         data = np.load(args.poses)
@@ -448,8 +476,11 @@ def run_pipeline(args: argparse.Namespace) -> int:
         ref_c2w = [data[c2w_key][i] for i in range(min(N, len(data[c2w_key])))]
         ref_K = [data[K_key][i] for i in range(min(N, len(data[K_key])))]
     else:
-        print(f"\n[1/5] Auto-detecting 3D camera angles using DA3...")
-        ref_c2w, ref_K = estimate_poses_with_da3(pil_images, device, process_res=min(height, width))
+        print(f"\n[1/5] Auto-detecting 3D camera angles using DA3 ({args.pose_model})...")
+        ref_c2w, ref_K = estimate_poses_with_da3(
+            pil_images, device, model_id=args.pose_model, process_res=min(height, width)
+        )
+    _log_memory("After Stage 1 (Camera Poses)")
 
     # Synthesize target wide-angle camera
     target_c2w, target_K = synthesize_wide_angle_camera(
@@ -483,6 +514,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
     from gae.pipeline import load_backbone, load_codec, load_flow, GAE, _read_latent_stats, _resolve_path
 
     # ── [2/5] Encode Reference Images into GAE Multi-View Latent ──
+    _log_memory("Before Stage 2 (GAE Reference Encode)")
     print(f"\n[2/5] Loading DA3 backbone & encoding {N} reference images...")
     backbone = _cast(load_backbone(str(args.config), device), args.backbone_precision)
     bb_dtype = _DTYPES[args.backbone_precision]
@@ -513,10 +545,12 @@ def run_pipeline(args: argparse.Namespace) -> int:
     backbone_norm = _resolve_backbone_norm(backbone)
     heavy_vit = backbone.encoder
     del backbone.encoder
-    _free(heavy_vit)
+    _free(heavy_vit, stage="DA3 ViT Encoder")
     print("      DA3 ViT offloaded from VRAM (DPT head retained).")
+    _log_memory("After Stage 2 (ViT Offloaded)")
 
     # ── [3/5] Compute Text Prompt Embeddings (Qwen3) ──
+    _log_memory("Before Stage 3 (Text Encode)")
     print("\n[3/5] Loading Qwen3 text encoder...")
     from stage2.models.text_encoder import Qwen3TextEncoder
     text_cfg = flow_cfg.get("text_encoder", {})
@@ -529,10 +563,12 @@ def run_pipeline(args: argparse.Namespace) -> int:
     with torch.inference_mode():
         ref_global = text_enc([args.prompt])["tokens"]
         cfg_null = text_enc([""])["tokens"]
-    _free(text_enc)
+    _free(text_enc, stage="Qwen3 Text Encoder")
     print("      Text encoder offloaded from VRAM.")
+    _log_memory("After Stage 3 (Text Offloaded)")
 
     # ── [4/5] Construct Plücker Rays & Denoise Novel Wide View ──
+    _log_memory("Before Stage 4 (Flow DiT Setup)")
     print("\n[4/5] Building Plücker rays & sampling wide-angle view with Flow DiT...")
     from eval_generation import build_plucker_from_cameras
     training_cfg = flow_cfg.get("training", {})
@@ -555,6 +591,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
     model.flow = flow
     model._configure_sampler(str(args.config))
 
+    _log_memory("Before Stage 4 Sampling (Flow DiT on GPU)")
     with torch.inference_mode():
         z_out = model.sample(
             z_ref=z_ref.to(_DTYPES[args.flow_precision]),
@@ -569,10 +606,12 @@ def run_pipeline(args: argparse.Namespace) -> int:
         )
 
     model.flow = None
-    _free(flow)
+    _free(flow, stage="Flow DiT Model")
     print("      Flow DiT offloaded from VRAM.")
+    _log_memory("After Stage 4 (Flow DiT Offloaded)")
 
     # ── [5/5] Decode Single Combined Wide-Angle Image & 3D Geometry ──
+    _log_memory("Before Stage 5 (VAE & DPT Geometry Decode)")
     print("\n[5/5] Decoding final wide-angle photorealistic image...")
     z_dec = z_out.to(_DTYPES[args.codec_precision])
     with torch.inference_mode():
@@ -604,11 +643,13 @@ def run_pipeline(args: argparse.Namespace) -> int:
         _ = model.save_outputs(out, args.output, stem="000", pc_stride=4)
         print(f"      3D Scene Point Cloud saved: {args.output / '000_pred_pointcloud.ply'}")
 
-    _free(codec)
+    _free(codec, stage="Codec")
     del backbone_norm, backbone
     gc.collect()
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
+    _log_memory("Pipeline Finished")
     print(f"All outputs ready in: {args.output}\n")
     return 0
 

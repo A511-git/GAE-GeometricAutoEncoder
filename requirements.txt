@@ -9,7 +9,7 @@ depth-anything-3>=0.1.0
 # Config / models / diffusion
 omegaconf
 einops
-transformers
+transformers>=4.44.0,<5.0.0
 safetensors
 huggingface-hub
 diffusers

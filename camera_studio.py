@@ -14,6 +14,14 @@ from collections import OrderedDict
 from pathlib import Path
 
 try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
+try:
     import spaces  # Provided by Hugging Face Spaces; optional for local smoke tests.
 except ImportError:  # pragma: no cover - only used outside Spaces
     class _LocalSpaces:
@@ -330,27 +338,36 @@ def _run(command: list[str], output_dir: Path, timeout: int) -> tuple[str, float
     # Runs beside the resident engine: one GPU, the one with the most free memory.
     env = captioner.side_job_env(os.environ)
     env.setdefault("TOKENIZERS_PARALLELISM", "false")
+    env.setdefault("PYTHONUNBUFFERED", "1")
     env["PYTHONPATH"] = f"{ROOT / 'src'}:{ROOT / 'scripts' / 'eval'}:{env.get('PYTHONPATH', '')}"
-    try:
-        result = subprocess.run(
+    log_file = output_dir / "space_run.log"
+    collected_lines = []
+    with log_file.open("w", encoding="utf-8") as log:
+        proc = subprocess.Popen(
             command,
             cwd=ROOT,
             env=env,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            timeout=timeout,
-            check=False,
         )
-    except subprocess.TimeoutExpired as exc:
-        tail = (exc.stdout or "")[-3000:]
-        raise gr.Error(f"Generation timed out after {timeout}s.\n\n{tail}") from exc
-    log = output_dir / "space_run.log"
-    log.write_text(result.stdout or "", encoding="utf-8")
-    if result.returncode != 0:
-        tail = (result.stdout or "")[-5000:]
-        raise gr.Error(f"Generation failed (exit {result.returncode}).\n\n{tail}")
-    return result.stdout or "", time.time() - started
+        try:
+            for line in proc.stdout:
+                log.write(line)
+                log.flush()
+                sys.stdout.write(f"[Studio Job] {line}")
+                sys.stdout.flush()
+                collected_lines.append(line)
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            proc.kill()
+            tail = "".join(collected_lines[-50:])
+            raise gr.Error(f"Generation timed out after {timeout}s.\n\n{tail}") from exc
+    full_output = "".join(collected_lines)
+    if proc.returncode != 0:
+        tail = "".join(collected_lines[-100:])
+        raise gr.Error(f"Generation failed (exit {proc.returncode}).\n\n{tail}")
+    return full_output, time.time() - started
 
 
 def _run_i2v_stream(command, output_dir, timeout):
@@ -368,6 +385,8 @@ def _run_i2v_stream(command, output_dir, timeout):
         def read_output():
             for line in proc.stdout:
                 log.write(line); log.flush()
+                sys.stdout.write(f"[I2V] {line}")
+                sys.stdout.flush()
                 if line.startswith("GAE_ARTIFACT_READY "):
                     try:
                         path = Path(json.loads(line.split(" ", 1)[1])["path"])
@@ -390,11 +409,24 @@ def _run_i2v_stream(command, output_dir, timeout):
             yield {"video": None, "elapsed": time.monotonic()-started, "error": error}
         finally:
             if proc.poll() is None:
-                os.killpg(proc.pid, signal.SIGTERM)
+                try:
+                    if hasattr(os, "killpg"):
+                        os.killpg(proc.pid, signal.SIGTERM)
+                    else:
+                        proc.terminate()
+                except Exception:
+                    pass
                 try:
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    os.killpg(proc.pid, signal.SIGKILL); proc.wait()
+                    try:
+                        if hasattr(os, "killpg"):
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        else:
+                            proc.kill()
+                    except Exception:
+                        pass
+                    proc.wait()
             reader.join(timeout=5)
             proc.stdout.close()
 
@@ -871,9 +903,15 @@ def main() -> None:
                         help="Port to bind (default: 7860)")
     parser.add_argument("--share", action="store_true", default=False,
                         help="Create a public Gradio share link (.gradio.live)")
+    parser.add_argument("--no-caption", action="store_true", default=False,
+                        help="Disable automatic image captioning using Vision-LLM (saves GPU memory and time).")
     parser.add_argument("--checkpoint-dir", "--ckpt-dir", type=str, default=None, dest="checkpoint_dir",
                         help="Directory where model checkpoints are saved/cached.")
     args = parser.parse_args()
+
+    if args.no_caption:
+        os.environ["GAE_CAPTION"] = "0"
+        print("[Camera Studio] Automatic captioning disabled (--no-caption).", flush=True)
 
     global CKPT_DIR
     if args.checkpoint_dir:
@@ -881,7 +919,7 @@ def main() -> None:
         CKPT_DIR = resolve_checkpoint_dir(args.checkpoint_dir)
 
     should_share = args.share or os.environ.get("GRADIO_SHARE", "0") in ("1", "true", "True")
-    print(f"[Camera Studio] Launching UI on {args.host}:{args.port} (share={should_share}, ckpt_dir={CKPT_DIR})...")
+    print(f"[Camera Studio] Launching UI on {args.host}:{args.port} (share={should_share}, ckpt_dir={CKPT_DIR})...", flush=True)
 
     allowed = [
         str(OUTPUT_ROOT),

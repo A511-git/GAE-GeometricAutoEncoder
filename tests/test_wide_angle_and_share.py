@@ -89,3 +89,18 @@ def test_distributed_engine_share_argument():
     assert "--share" in code
     assert "share=a.share" in code
 
+
+def test_camera_studio_no_caption_argument():
+    """Verify camera_studio.py supports --no-caption argument."""
+    code = (ROOT / "camera_studio.py").read_text(encoding="utf-8")
+    assert "--no-caption" in code
+    assert 'os.environ["GAE_CAPTION"] = "0"' in code
+
+
+def test_wide_angle_synthesizer_pose_model_and_memory_logging():
+    """Verify wide_angle_synthesizer.py supports --pose-model and _log_memory."""
+    code = (ROOT / "scripts" / "demo" / "wide_angle_synthesizer.py").read_text(encoding="utf-8")
+    assert "--pose-model" in code
+    assert "def _log_memory" in code
+    assert "RAM:" in code
+
