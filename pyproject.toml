@@ -41,6 +41,7 @@ dependencies = [
     "pyarrow",
     "orjson",
     "webdataset",
+    "gradio",
 ]
 
 [project.optional-dependencies]

@@ -88,3 +88,4 @@ def test_distributed_engine_share_argument():
     code = (ROOT / "scripts" / "demo" / "distributed_engine.py").read_text(encoding="utf-8")
     assert "--share" in code
     assert "share=a.share" in code
+
