@@ -154,3 +154,23 @@ def test_sm75_bfloat16_precision_fallback_and_attention_fallback():
     assert "Auto-fallback" in code_synth
     assert "major >= 8" in code_synth
 
+
+def test_dpt_helpers_format_recon_dtype_alignment():
+    """Verify _format_recon_for_dpt preserves or aligns patch dtypes."""
+    import sys
+    sys.path.insert(0, str(ROOT / "src"))
+    import torch
+    import torch.nn as nn
+    from utils.dpt_helpers import _format_recon_for_dpt
+
+    ln = nn.LayerNorm(1536).half()
+    recon_feats = {
+        0: torch.randn(2, 64, 3072, dtype=torch.float16),
+        1: torch.randn(2, 64, 3072, dtype=torch.float16),
+    }
+    dpt_in = _format_recon_for_dpt(recon_feats, ln, bv=2)
+    assert len(dpt_in) == 2
+    for patches, cls_zeros in dpt_in:
+        assert patches.dtype == torch.float16
+        assert cls_zeros.dtype == torch.float16
+

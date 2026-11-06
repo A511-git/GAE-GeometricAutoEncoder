@@ -897,10 +897,14 @@ class GAECodec(nn.Module):
         parts = [feats[lvl].transpose(1, 2).reshape(bv, self._level_dim, h, w)
                  for lvl in range(NUM_DA3_LEVELS)]
         x = torch.cat(parts, dim=1)
-        return (x - self.feat_mean) / (self.feat_std + 1e-5)
+        mean = self.feat_mean.to(device=x.device, dtype=x.dtype)
+        std = self.feat_std.to(device=x.device, dtype=x.dtype)
+        return (x - mean) / (std + 1e-5)
 
     def denormalize_and_split(self, x: torch.Tensor) -> Dict[int, torch.Tensor]:
-        x = x * (self.feat_std + 1e-5) + self.feat_mean
+        mean = self.feat_mean.to(device=x.device, dtype=x.dtype)
+        std = self.feat_std.to(device=x.device, dtype=x.dtype)
+        x = x * (std + 1e-5) + mean
         chunks = x.split(self._level_dim, dim=1)
         return {lvl: ch.reshape(ch.shape[0], ch.shape[1], -1).transpose(1, 2)
                 for lvl, ch in enumerate(chunks)}

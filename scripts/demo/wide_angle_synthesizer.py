@@ -650,7 +650,12 @@ def run_pipeline(args: argparse.Namespace) -> int:
         feats_split = codec.denormalize_and_split(feat_recon)
         from utils.dpt_helpers import _format_recon_for_dpt
         dpt_in = _format_recon_for_dpt(feats_split, backbone_norm, z_dec.shape[0])
-        with torch.autocast(device_type=device.type, enabled=False):
+        dec_dtype = next(backbone.rae_cl_decoder.parameters()).dtype
+        dpt_in = [
+            (p.to(dtype=dec_dtype), c.to(dtype=dec_dtype))
+            for p, c in dpt_in
+        ]
+        with torch.autocast(device_type=device.type, enabled=(device.type == "cuda" and dec_dtype != torch.float32), dtype=dec_dtype):
             geo = backbone.rae_cl_decoder(dpt_in, height, width, patch_start_idx=0)
 
     # Extract target wide-angle image (the novel view at index N)

@@ -35,11 +35,26 @@ def _format_recon_for_dpt(recon_feats, backbone_norm, bv, embed_dim=None):
     edim = embed_dim or _DA3_EMBED_DIM
     hidden_size = edim * 2  # [local, global] concatenation
     result = []
+    norm_dtype = None
+    if backbone_norm is not None and hasattr(backbone_norm, "parameters"):
+        params = list(backbone_norm.parameters())
+        if params:
+            norm_dtype = params[0].dtype
+
     for lvl in sorted(recon_feats.keys()):
         patches = recon_feats[lvl]             # (BV, N, C)
-        cls_zeros = torch.zeros(bv, hidden_size, device=patches.device, dtype=patches.dtype)
+        target_dtype = norm_dtype or patches.dtype
+        if patches.dtype != target_dtype:
+            patches = patches.to(dtype=target_dtype)
+        cls_zeros = torch.zeros(bv, hidden_size, device=patches.device, dtype=target_dtype)
         local = patches[:, :, :edim]
-        glob_ln = backbone_norm(patches[:, :, edim:])
+        glob_in = patches[:, :, edim:]
+        if backbone_norm is not None:
+            glob_ln = backbone_norm(glob_in)
+            if glob_ln.dtype != target_dtype:
+                glob_ln = glob_ln.to(dtype=target_dtype)
+        else:
+            glob_ln = glob_in
         result.append((torch.cat([local, glob_ln], dim=-1).unsqueeze(0),
                         cls_zeros.unsqueeze(0)))
     return result
