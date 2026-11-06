@@ -188,3 +188,91 @@ def test_recover_poses_and_pointcloud_fallback():
     assert "Failed to generate 3D point cloud" in code_synth
 
 
+def test_auto_detect_resolution_aspect_ratios():
+    """Verify auto_detect_resolution derives optimal multiples of 14 matching image aspects."""
+    import sys
+    sys.path.insert(0, str(ROOT / "scripts" / "demo"))
+    from wide_angle_synthesizer import auto_detect_resolution
+
+    # 1. Portrait 3:4 (e.g. 3024 x 4032 smartphone vertical photo)
+    h, w = auto_detect_resolution(4032, 3024)
+    assert (h, w) == (504, 378)
+    assert h % 14 == 0 and w % 14 == 0
+    assert abs(w / h - 0.75) < 0.01
+
+    # 2. Landscape 4:3 (e.g. 4032 x 3024 smartphone horizontal photo)
+    h, w = auto_detect_resolution(3024, 4032)
+    assert (h, w) == (378, 504)
+    assert h % 14 == 0 and w % 14 == 0
+    assert abs(w / h - 1.333) < 0.01
+
+    # 3. Landscape 16:9 (e.g. 1920 x 1080)
+    h, w = auto_detect_resolution(1080, 1920)
+    assert (h, w) == (378, 672)
+    assert h % 14 == 0 and w % 14 == 0
+
+    # 4. Square 1:1
+    h, w = auto_detect_resolution(1000, 1000)
+    assert (h, w) == (448, 448)
+    assert h % 14 == 0 and w % 14 == 0
+
+
+def test_resize_and_crop_preserves_aspect():
+    """Verify resize_and_crop resizes without geometric stretching."""
+    import sys
+    import numpy as np
+    sys.path.insert(0, str(ROOT / "scripts" / "demo"))
+    from wide_angle_synthesizer import resize_and_crop
+
+    # Create dummy 3000 x 4000 portrait image
+    img = np.zeros((4000, 3000, 3), dtype=np.uint8)
+    out = resize_and_crop(img, target_w=378, target_h=504)
+    assert out.shape == (504, 378, 3)
+
+
+def test_single_image_cli_and_canonical_camera(monkeypatch, tmp_path):
+    """Verify single-image --image support, canonical camera creation, and correct right-side-up OpenCV orientation."""
+    import sys
+    import numpy as np
+    sys.path.insert(0, str(ROOT / "scripts" / "demo"))
+    from wide_angle_synthesizer import parse_args, synthesize_wide_angle_camera, _collect_images
+
+    # Single test image
+    img_path = tmp_path / "single_portrait.jpg"
+    img_path.write_text("dummy")
+    out_dir = tmp_path / "out"
+
+    # 1. Test CLI parsing with --image
+    monkeypatch.setattr(
+        sys, "argv",
+        ["wide_angle_synthesizer.py", "--image", str(img_path), "--output", str(out_dir)]
+    )
+    args = parse_args()
+    assert len(args.collected_images) == 1
+    assert args.collected_images[0] == img_path
+    assert args.resolution is None  # Auto-detection enabled when omitted
+
+    # 2. Canonical camera matrix test for single image
+    ref_c2w = [np.eye(4, dtype=np.float64)]
+    focal = 0.8 * 504
+    ref_K = [np.array([
+        [focal, 0.0, 378 / 2.0],
+        [0.0, focal, 504 / 2.0],
+        [0.0, 0.0, 1.0],
+    ], dtype=np.float64)]
+
+    # Synthesize wide angle camera
+    pull_back = 0.35
+    fov_scale = 0.80
+    target_c2w, target_K = synthesize_wide_angle_camera(ref_c2w, ref_K, pull_back=pull_back, fov_scale=fov_scale)
+
+    # Orientation R should be exactly identity (no inverted or upside-down axes!)
+    np.testing.assert_allclose(target_c2w[:3, :3], np.eye(3), atol=1e-6)
+    # Position should retreat along -Z in camera/scene frame: (0, 0, -0.35)
+    np.testing.assert_allclose(target_c2w[:3, 3], np.array([0.0, 0.0, -pull_back]), atol=1e-6)
+    # Target K should have widened FOV (focal scaled by 0.80)
+    assert abs(target_K[0, 0] - focal * fov_scale) < 1e-4
+    assert abs(target_K[1, 1] - focal * fov_scale) < 1e-4
+
+
+

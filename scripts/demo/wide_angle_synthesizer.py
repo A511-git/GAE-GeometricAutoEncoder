@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import math
 import os
 import re
 import sys
@@ -165,14 +166,24 @@ def synthesize_wide_angle_camera(
     # Position virtual camera pulled back along -avg_fwd
     cam_pos = centroid - pull_back * avg_fwd
 
-    # Build rotation looking towards the scene
+    # Build camera rotation in OpenCV frame (X-right, Y-down, Z-forward)
     z_axis = avg_fwd
-    up_hint = np.array([0.0, -1.0, 0.0], dtype=np.float64)
-    x_axis = np.cross(up_hint, z_axis)
+    # Average down vector (+Y in OpenCV camera frame) across reference views
+    downs = np.array([c[:3, 1] for c in ref_c2w], dtype=np.float64)
+    avg_down = downs.mean(axis=0)
+    if np.linalg.norm(avg_down) < 1e-6:
+        avg_down = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+    else:
+        avg_down = avg_down / np.linalg.norm(avg_down)
+
+    # In OpenCV camera frame: X = cross(Y, Z)
+    x_axis = np.cross(avg_down, z_axis)
     if np.linalg.norm(x_axis) < 1e-6:
         x_axis = np.array([1.0, 0.0, 0.0], dtype=np.float64)
     else:
         x_axis = x_axis / np.linalg.norm(x_axis)
+
+    # Orthogonalize Y: Y = cross(Z, X)
     y_axis = np.cross(z_axis, x_axis)
     y_axis = y_axis / np.linalg.norm(y_axis)
 
@@ -292,6 +303,57 @@ def resolve_resolution(h: int, w: int) -> tuple[int, int]:
     return snapped_h, snapped_w
 
 
+def auto_detect_resolution(raw_h: int, raw_w: int) -> tuple[int, int]:
+    """Derive optimal (height, width) multiples of 14 matching input aspect ratio."""
+    aspect = float(raw_w) / float(raw_h)
+    # Portrait 3:4 (w/h ≈ 0.75) -> 504h x 378w
+    if 0.68 <= aspect <= 0.82:
+        return 504, 378
+    # Landscape 4:3 (w/h ≈ 1.33) -> 378h x 504w
+    if 1.25 <= aspect <= 1.42:
+        return 378, 504
+    # Landscape 16:9 (w/h ≈ 1.77) -> 378h x 672w
+    if 1.60 <= aspect <= 1.95:
+        return 378, 672
+    # Portrait 9:16 (w/h ≈ 0.56) -> 672h x 378w
+    if 0.48 <= aspect <= 0.62:
+        return 672, 378
+    # Square 1:1 -> 448h x 448w
+    if 0.92 <= aspect <= 1.08:
+        return 448, 448
+
+    # Generic aspect ratio: target ~1100 tokens (each token 14x14)
+    target_area = 1100 * 14 * 14
+    h_est = math.sqrt(target_area / aspect)
+    w_est = h_est * aspect
+    h_snap = snap_to_multiple_of_14(int(round(h_est)))
+    w_snap = snap_to_multiple_of_14(int(round(w_est)))
+    return h_snap, w_snap
+
+
+def resize_and_crop(img_bgr: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
+    """Resize with aspect preservation and minimal center-crop to avoid stretching."""
+    h, w = img_bgr.shape[:2]
+    target_aspect = float(target_w) / float(target_h)
+    current_aspect = float(w) / float(h)
+
+    if abs(current_aspect - target_aspect) < 1e-3:
+        return cv2.resize(img_bgr, (target_w, target_h), interpolation=cv2.INTER_AREA)
+
+    if current_aspect > target_aspect:
+        # Image is wider: fit height and center crop width
+        new_w = int(round(h * target_aspect))
+        start_x = max(0, (w - new_w) // 2)
+        cropped = img_bgr[:, start_x:start_x + new_w]
+    else:
+        # Image is taller: fit width and center crop height
+        new_h = int(round(w / target_aspect))
+        start_y = max(0, (h - new_h) // 2)
+        cropped = img_bgr[start_y:start_y + new_h, :]
+
+    return cv2.resize(cropped, (target_w, target_h), interpolation=cv2.INTER_AREA)
+
+
 # ─────────────────────────── CLI Arguments ───────────────────────────
 
 VALID_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"}
@@ -302,9 +364,21 @@ def _natural_sort_key(p: Path) -> list:
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r"(\d+)", p.name)]
 
 
-def _collect_images(paths: list[Path] | None, folder: Path | None = None) -> list[Path]:
-    """Gather image paths from either a list of file paths, directory paths, or a folder."""
+def _collect_images(
+    paths: list[Path] | None = None,
+    folder: Path | None = None,
+    single_image: Path | None = None,
+) -> list[Path]:
+    """Gather image paths from either a single image, list of file paths, directory paths, or a folder."""
     collected: list[Path] = []
+
+    if single_image:
+        if single_image.is_file() and single_image.suffix.lower() in VALID_IMAGE_EXTENSIONS:
+            collected.append(single_image)
+        elif single_image.is_file():
+            print(f"[WideSynthesizer] Skipping non-image file: {single_image}", file=sys.stderr)
+        else:
+            print(f"[WideSynthesizer] Warning: Single image not found: {single_image}", file=sys.stderr)
 
     def _scan_dir(d: Path) -> list[Path]:
         files = [p for p in d.iterdir() if p.is_file() and p.suffix.lower() in VALID_IMAGE_EXTENSIONS]
@@ -351,12 +425,14 @@ def _collect_images(paths: list[Path] | None, folder: Path | None = None) -> lis
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--image", type=Path, default=None,
+                        help="Single input image path for wide-angle synthesis.")
     parser.add_argument("--images", nargs="+", type=Path, default=None,
                         help="List of input image paths or folder(s) containing images (e.g. --images my_folder/ or --images f1.jpg f2.jpg).")
     parser.add_argument("--image-dir", "--images-dir", "--folder", type=Path, default=None, dest="image_dir",
-                        help="Directory containing the input images (e.g. 3, 5, or more images).")
+                        help="Directory containing the input images (e.g. 1, 3, 5, or more images).")
     parser.add_argument("--poses", type=Path, default=None,
-                        help="Optional pre-existing pose .npz file (if omitted, DA3 auto-estimates).")
+                        help="Optional pre-existing pose .npz file (if omitted, DA3 auto-estimates for multi-image).")
     parser.add_argument("--pose-model", type=str, default="depth-anything/DA3NESTED-GIANT-LARGE-1.1",
                         help="Depth Anything 3 model id or path for pose estimation (default: depth-anything/DA3NESTED-GIANT-LARGE-1.1).")
     parser.add_argument("--prompt", type=str, default=None,
@@ -371,8 +447,8 @@ def parse_args() -> argparse.Namespace:
                         help="Manual yaw angle offset (deg) for the wide-angle camera.")
     parser.add_argument("--pitch-offset", type=float, default=0.0,
                         help="Manual pitch angle offset (deg) for the wide-angle camera.")
-    parser.add_argument("--resolution", type=int, nargs=2, default=(378, 672),
-                        metavar=("HEIGHT", "WIDTH"), help="Render resolution (default: 378 672).")
+    parser.add_argument("--resolution", type=int, nargs=2, default=None,
+                        metavar=("HEIGHT", "WIDTH"), help="Render resolution [HEIGHT WIDTH] (default: auto-detected from photo aspect ratio).")
     parser.add_argument("--sample-steps", type=int, default=50, help="DiT Flow sampling steps.")
     parser.add_argument("--cfg-scale", type=float, default=2.0, help="Classifier-free guidance scale.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
@@ -393,13 +469,12 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
 
     # Collect images
-    image_paths = _collect_images(args.images, args.image_dir)
+    image_paths = _collect_images(paths=args.images, folder=args.image_dir, single_image=args.image)
 
-    if len(image_paths) < 2:
-        source_hint = args.images if args.images else args.image_dir
+    if len(image_paths) < 1:
+        source_hint = args.image or args.images or args.image_dir
         raise SystemExit(
-            f"Error: Wide-angle synthesis requires >= 2 images to estimate relative 3D space "
-            f"(found {len(image_paths)} from {source_hint})."
+            f"Error: Wide-angle synthesis requires at least 1 image (found 0 from {source_hint})."
         )
     args.collected_images = image_paths
 
@@ -408,8 +483,9 @@ def parse_args() -> argparse.Namespace:
     if not args.prompt:
         args.prompt = "a photorealistic wide-angle view of a room, highly detailed, sharp focus, natural lighting"
 
-    # Auto-resolve resolution to nearest valid multiples of 14
-    args.resolution = resolve_resolution(args.resolution[0], args.resolution[1])
+    # Auto-resolve resolution if explicitly passed by user
+    if args.resolution is not None:
+        args.resolution = resolve_resolution(args.resolution[0], args.resolution[1])
 
     from gae.hub import resolve_checkpoint_dir, resolve_model_file
     args.checkpoint_dir = resolve_checkpoint_dir(args.checkpoint_dir)
@@ -442,8 +518,21 @@ def _download_checkpoints(args: argparse.Namespace) -> None:
 def run_pipeline(args: argparse.Namespace) -> int:
     _download_checkpoints(args)
     args.output.mkdir(parents=True, exist_ok=True)
-    height, width = args.resolution
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    N = len(args.collected_images)
+
+    # Inspect first image for native aspect ratio & auto-detect resolution if omitted
+    first_p = args.collected_images[0]
+    first_raw = cv2.imread(str(first_p), cv2.IMREAD_COLOR)
+    if first_raw is None:
+        raise SystemExit(f"Cannot read image: {first_p}")
+    raw_h, raw_w = first_raw.shape[:2]
+
+    if args.resolution is None:
+        height, width = auto_detect_resolution(raw_h, raw_w)
+        print(f"[Resolution] Auto-detected input {raw_w}x{raw_h} (aspect {raw_w/raw_h:.2f}) -> render resolution: {width}x{height}")
+    else:
+        height, width = args.resolution
 
     # Detect GPUs lacking native hardware BF16 (e.g. SM < 8.0 such as Tesla T4 / Turing)
     is_bf16_ok = True
@@ -462,27 +551,26 @@ def run_pipeline(args: argparse.Namespace) -> int:
 
     _log_memory("Pipeline Start")
 
-    N = len(args.collected_images)
     print(f"\n=======================================================")
-    print(f" [GAE Wide-Angle Synthesizer] Processing {N} Images")
+    print(f" [GAE Wide-Angle Synthesizer] Processing {N} Image(s)")
     print(f" Output Resolution: {width}x{height} | Pullback: {args.pull_back}m | FOV Scale: {args.fov_scale}")
     print(f"=======================================================")
-    print(f"Input image sequence ({N} views):")
+    print(f"Input image sequence ({N} view(s)):")
     for i, p in enumerate(args.collected_images):
         print(f"  [{i+1}/{N}] {p.name}")
 
-    # Load and resize images
+    # Load and resize images with aspect-ratio preservation
     pil_images: list[Image.Image] = []
     cv_images: list[np.ndarray] = []
     for p in args.collected_images:
         raw = cv2.imread(str(p), cv2.IMREAD_COLOR)
         if raw is None:
             raise SystemExit(f"Cannot read image: {p}")
-        resized = cv2.resize(raw, (width, height), interpolation=cv2.INTER_AREA)
+        resized = resize_and_crop(raw, width, height)
         cv_images.append(resized)
         pil_images.append(Image.fromarray(cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)))
 
-    # ── [1/5] Camera Pose Estimation (Auto-detected or Loaded) ──
+    # ── [1/5] Camera Pose Estimation (Auto-detected, Canonical N=1, or Loaded) ──
     _log_memory("Before Stage 1 (Camera Poses)")
     if args.poses and args.poses.is_file():
         print(f"\n[1/5] Loading pre-existing poses from: {args.poses}")
@@ -491,8 +579,19 @@ def run_pipeline(args: argparse.Namespace) -> int:
         K_key = "input_K" if "input_K" in data else "K"
         ref_c2w = [data[c2w_key][i] for i in range(min(N, len(data[c2w_key])))]
         ref_K = [data[K_key][i] for i in range(min(N, len(data[K_key])))]
+    elif N == 1:
+        print("\n[1/5] Single input image detected: establishing canonical camera frame (bypassing DA3 pose estimator)...")
+        c2w = np.eye(4, dtype=np.float64)
+        focal = 0.8 * max(height, width)
+        K = np.array([
+            [focal, 0.0, width / 2.0],
+            [0.0, focal, height / 2.0],
+            [0.0, 0.0, 1.0],
+        ], dtype=np.float64)
+        ref_c2w = [c2w]
+        ref_K = [K]
     else:
-        print(f"\n[1/5] Auto-detecting 3D camera angles using DA3 ({args.pose_model})...")
+        print(f"\n[1/5] Auto-detecting 3D camera angles across {N} images using DA3 ({args.pose_model})...")
         ref_c2w, ref_K = estimate_poses_with_da3(
             pil_images, device, model_id=args.pose_model, process_res=min(height, width)
         )
@@ -513,9 +612,10 @@ def run_pipeline(args: argparse.Namespace) -> int:
     cond_num = N
 
     # Save 3D Camera Diagram & Poses
+    title_str = "Camera Layout: 1 Reference (Blue) + Wide Target (Red)" if N == 1 else f"Multi-Camera Layout: {N} References (Blue) + Wide Target (Red)"
     render_trajectory_frustums(
         all_c2w, cond_num, args.output / "000_trajectory.png",
-        title=f"Multi-Camera Layout: {N} References (Blue) + Wide Target (Red)"
+        title=title_str
     )
     np.savez_compressed(
         args.output / "000_poses.npz",
