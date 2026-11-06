@@ -363,10 +363,10 @@ def parse_args() -> argparse.Namespace:
                         help="Text prompt describing the scene.")
     parser.add_argument("--prompt-file", type=Path, default=None,
                         help="Text file containing the prompt.")
-    parser.add_argument("--pull-back", type=float, default=1.2,
-                        help="Distance in meters to pull back the virtual wide camera (default: 1.2m).")
-    parser.add_argument("--fov-scale", type=float, default=0.70,
-                        help="Focal length scale (< 1.0 widens the field of view, default: 0.70).")
+    parser.add_argument("--pull-back", type=float, default=0.35,
+                        help="Camera retreat distance in DA3 canonical scale (default: 0.35 matches RE10K/DL3DV distribution).")
+    parser.add_argument("--fov-scale", type=float, default=0.80,
+                        help="Focal length scale (< 1.0 widens the field of view, default: 0.80).")
     parser.add_argument("--yaw-offset", type=float, default=0.0,
                         help="Manual yaw angle offset (deg) for the wide-angle camera.")
     parser.add_argument("--pitch-offset", type=float, default=0.0,
@@ -544,6 +544,9 @@ def run_pipeline(args: argparse.Namespace) -> int:
         resolved = _resolve_path(str(stats_path), args.checkpoint_dir)
         if resolved.is_file():
             latent_mean, latent_std = _read_latent_stats(str(resolved))
+            print(f"[WideSynthesizer] Loaded latent normalization stats from {resolved}")
+        else:
+            print(f"[WideSynthesizer] Warning: latent stats file not found at {resolved}")
 
     model = GAE(backbone, codec, flow=None, latent_mean=latent_mean, latent_std=latent_std).to(device)
 
@@ -641,6 +644,8 @@ def run_pipeline(args: argparse.Namespace) -> int:
     _log_memory("Before Stage 5 (VAE & DPT Geometry Decode on GPU)")
     print("\n[5/5] Decoding final wide-angle photorealistic image...")
     z_dec = z_out.to(_DTYPES[args.codec_precision])
+    # Anchor reference views with pristine ground-truth latents for crisp geometry and cross-attention
+    z_dec[:cond_num] = z_ref.to(device=device, dtype=z_dec.dtype)
     with torch.inference_mode():
         trunk_seq, h_p, w_p = codec._decode_trunk(z_dec)
         rgb = model._denormalize_rgb(codec.rgb_head(trunk_seq, h_p, w_p, num_views=total_views))
@@ -668,6 +673,17 @@ def run_pipeline(args: argparse.Namespace) -> int:
     print(f"\n=======================================================")
     print(f" [SUCCESS] Wide-Angle Image Saved: {out_image_path}")
     print(f"=======================================================")
+
+    # Explicitly save target wide-angle depth map
+    if "depth" in geo:
+        dep = geo["depth"]
+        dep_views = dep[0] if dep.ndim >= 4 and dep.shape[0] == 1 else dep
+        target_dep = dep_views[cond_num].float().cpu()
+        from eval_data import depth_to_numpy_img
+        target_dep_np = depth_to_numpy_img(target_dep)
+        wide_dep_path = args.output / "000_wide_angle_depth.png"
+        cv2.imwrite(str(wide_dep_path), cv2.cvtColor(target_dep_np, cv2.COLOR_RGB2BGR))
+        print(f" [SUCCESS] Wide-Angle Depth Saved: {wide_dep_path}")
 
     # Also save 3D Point Cloud (.ply) if requested
     if args.save_pointcloud:
