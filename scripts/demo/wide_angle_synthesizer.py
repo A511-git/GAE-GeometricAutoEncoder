@@ -643,9 +643,12 @@ def run_pipeline(args: argparse.Namespace) -> int:
     backbone.to(device)
     _log_memory("Before Stage 5 (VAE & DPT Geometry Decode on GPU)")
     print("\n[5/5] Decoding final wide-angle photorealistic image...")
-    z_dec = z_out.to(_DTYPES[args.codec_precision])
-    # Anchor reference views with pristine ground-truth latents for crisp geometry and cross-attention
-    z_dec[:cond_num] = z_ref.to(device=device, dtype=z_dec.dtype)
+    codec_dtype = _DTYPES[args.codec_precision]
+    # Combine pristine ground-truth reference latents with DiT-generated novel views
+    z_dec = torch.cat([
+        z_ref.to(device=device, dtype=codec_dtype),
+        z_out[cond_num:].to(device=device, dtype=codec_dtype),
+    ], dim=0)
     with torch.inference_mode():
         trunk_seq, h_p, w_p = codec._decode_trunk(z_dec)
         rgb = model._denormalize_rgb(codec.rgb_head(trunk_seq, h_p, w_p, num_views=total_views))
