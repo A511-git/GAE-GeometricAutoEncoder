@@ -11,7 +11,16 @@ Sequential model lifecycle:
 Peak VRAM is bounded to ~10-12 GB, making it fully compatible with Kaggle,
 Google Colab, and consumer GPUs.
 
-Usage Example:
+Usage Examples:
+    # Option 1: Pass a folder containing images (3, 5, or any number of photos):
+    python scripts/demo/wide_angle_synthesizer.py \\
+        --images path/to/room_photos/ \\
+        --prompt "a photorealistic wide-angle view of a serene room, sharp focus, natural lighting" \\
+        --pull-back 1.2 \\
+        --fov-scale 0.70 \\
+        --output results/wide_angle_room
+
+    # Option 2: Pass a list of individual image files:
     python scripts/demo/wide_angle_synthesizer.py \\
         --images face1.jpg face2.jpg face3.jpg face4.jpg face5.jpg \\
         --prompt "a photorealistic wide-angle view of a serene room, sharp focus, natural lighting" \\
@@ -25,6 +34,7 @@ import argparse
 import gc
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Any
@@ -260,12 +270,67 @@ def resolve_resolution(h: int, w: int) -> tuple[int, int]:
 
 # ─────────────────────────── CLI Arguments ───────────────────────────
 
+VALID_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"}
+
+
+def _natural_sort_key(p: Path) -> list:
+    """Sort filenames containing numbers naturally (e.g. img_2 before img_10)."""
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r"(\d+)", p.name)]
+
+
+def _collect_images(paths: list[Path] | None, folder: Path | None = None) -> list[Path]:
+    """Gather image paths from either a list of file paths, directory paths, or a folder."""
+    collected: list[Path] = []
+
+    def _scan_dir(d: Path) -> list[Path]:
+        files = [p for p in d.iterdir() if p.is_file() and p.suffix.lower() in VALID_IMAGE_EXTENSIONS]
+        return sorted(files, key=_natural_sort_key)
+
+    if paths:
+        for p in paths:
+            if p.is_dir():
+                found = _scan_dir(p)
+                print(f"[WideSynthesizer] Found {len(found)} image(s) in folder: {p}")
+                collected.extend(found)
+            elif p.is_file():
+                if p.suffix.lower() in VALID_IMAGE_EXTENSIONS:
+                    collected.append(p)
+                else:
+                    print(f"[WideSynthesizer] Skipping non-image file: {p}", file=sys.stderr)
+            else:
+                # Attempt glob if wildcard
+                if any(ch in str(p) for ch in ("*", "?", "[")):
+                    globbed = sorted([x for x in Path().glob(str(p)) if x.is_file() and x.suffix.lower() in VALID_IMAGE_EXTENSIONS], key=_natural_sort_key)
+                    collected.extend(globbed)
+                else:
+                    print(f"[WideSynthesizer] Warning: Path not found: {p}", file=sys.stderr)
+
+    if folder and folder.is_dir():
+        found = _scan_dir(folder)
+        print(f"[WideSynthesizer] Found {len(found)} image(s) in folder: {folder}")
+        collected.extend(found)
+
+    # Deduplicate while preserving order
+    seen: set[Path] = set()
+    deduped: list[Path] = []
+    for p in collected:
+        try:
+            resolved = p.resolve()
+        except Exception:
+            resolved = p
+        if resolved not in seen:
+            seen.add(resolved)
+            deduped.append(p)
+
+    return deduped
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--images", nargs="+", type=Path, default=None,
-                        help="List of input image paths (e.g. face1.jpg face2.jpg ...).")
-    parser.add_argument("--image-dir", type=Path, default=None,
-                        help="Directory containing the input images.")
+                        help="List of input image paths or folder(s) containing images (e.g. --images my_folder/ or --images f1.jpg f2.jpg).")
+    parser.add_argument("--image-dir", "--images-dir", "--folder", type=Path, default=None, dest="image_dir",
+                        help="Directory containing the input images (e.g. 3, 5, or more images).")
     parser.add_argument("--poses", type=Path, default=None,
                         help="Optional pre-existing pose .npz file (if omitted, DA3 auto-estimates).")
     parser.add_argument("--prompt", type=str, default=None,
@@ -301,17 +366,14 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
 
     # Collect images
-    image_paths: list[Path] = []
-    if args.images:
-        image_paths.extend(args.images)
-    elif args.image_dir and args.image_dir.is_dir():
-        image_paths.extend(sorted([
-            p for p in args.image_dir.iterdir()
-            if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
-        ]))
+    image_paths = _collect_images(args.images, args.image_dir)
 
     if len(image_paths) < 2:
-        raise SystemExit(f"Error: Wide-angle synthesis requires >= 2 images (found {len(image_paths)}).")
+        source_hint = args.images if args.images else args.image_dir
+        raise SystemExit(
+            f"Error: Wide-angle synthesis requires >= 2 images to estimate relative 3D space "
+            f"(found {len(image_paths)} from {source_hint})."
+        )
     args.collected_images = image_paths
 
     if args.prompt_file and args.prompt_file.is_file():
@@ -353,6 +415,9 @@ def run_pipeline(args: argparse.Namespace) -> int:
     print(f" [GAE Wide-Angle Synthesizer] Processing {N} Images")
     print(f" Output Resolution: {width}x{height} | Pullback: {args.pull_back}m | FOV Scale: {args.fov_scale}")
     print(f"=======================================================")
+    print(f"Input image sequence ({N} views):")
+    for i, p in enumerate(args.collected_images):
+        print(f"  [{i+1}/{N}] {p.name}")
 
     # Load and resize images
     pil_images: list[Image.Image] = []

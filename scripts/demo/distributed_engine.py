@@ -152,6 +152,8 @@ def setup(checkpoint_dir, cfg_parallel):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--serve", action="store_true")
+    p.add_argument("--share", action="store_true", default=False,
+                   help="Create a public Gradio share link (.gradio.live)")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=7860)
     p.add_argument("--checkpoint-dir", required=True)
@@ -218,7 +220,8 @@ def main():
                 app.demo.queue(default_concurrency_limit=1).launch(
                     server_name=a.host,
                     server_port=a.port,
-                    share=os.environ.get("GRADIO_SHARE", "0") == "1", css=app.CSS,
+                    share=a.share or os.environ.get("GRADIO_SHARE", "0") in ("1", "true", "True"),
+                    css=app.CSS,
                     allowed_paths=[str(app.OUTPUT_ROOT), str(ROOT / "examples"),
                                    str(ROOT / "scripts/demo/camera_editor.js"),
                                    str(ROOT / "scripts/demo/camera_studio.css")],

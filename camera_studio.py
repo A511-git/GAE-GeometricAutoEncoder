@@ -861,5 +861,35 @@ The editor previews depth estimated from one image. Empty areas are unseen; the 
         )
 
 
+def main() -> None:
+    import argparse
+    parser = argparse.ArgumentParser(description="GAE Camera Studio Gradio Interface")
+    parser.add_argument("--host", default=os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0"),
+                        help="Host interface to bind (default: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("GRADIO_SERVER_PORT", "7860")),
+                        help="Port to bind (default: 7860)")
+    parser.add_argument("--share", action="store_true", default=False,
+                        help="Create a public Gradio share link (.gradio.live)")
+    args = parser.parse_args()
+
+    should_share = args.share or os.environ.get("GRADIO_SHARE", "0") in ("1", "true", "True")
+    print(f"[Camera Studio] Launching UI on {args.host}:{args.port} (share={should_share})...")
+
+    allowed = [
+        str(OUTPUT_ROOT),
+        str(ROOT / "examples"),
+        str(ROOT / "scripts" / "demo" / "camera_editor.js"),
+        str(ROOT / "scripts" / "demo" / "camera_studio.css"),
+    ]
+
+    demo.queue(default_concurrency_limit=1).launch(
+        server_name=args.host,
+        server_port=args.port,
+        share=should_share,
+        css=CSS,
+        allowed_paths=allowed,
+    )
+
+
 if __name__ == "__main__":
-    raise SystemExit("Launch Camera Studio with: bash scripts/demo/run_fast_demo.sh")
+    main()
