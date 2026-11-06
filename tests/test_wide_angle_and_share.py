@@ -143,12 +143,14 @@ def test_sm75_bfloat16_precision_fallback_and_attention_fallback():
     code_plucker = (ROOT / "src" / "stage2" / "models" / "plucker_attention.py").read_text(encoding="utf-8")
     assert "except (NotImplementedError, RuntimeError, ValueError):" in code_plucker
     assert "x_attn = F.scaled_dot_product_attention(" in code_plucker
+    assert "needs_fp16" in code_plucker
 
     code_model_utils = (ROOT / "src" / "stage2" / "models" / "model_utils.py").read_text(encoding="utf-8")
     assert "except (NotImplementedError, RuntimeError, ValueError):" in code_model_utils
     assert "x = F.scaled_dot_product_attention(" in code_model_utils
+    assert "needs_fp16" in code_model_utils
 
     code_synth = (ROOT / "scripts" / "demo" / "wide_angle_synthesizer.py").read_text(encoding="utf-8")
     assert "Auto-fallback" in code_synth
-    assert "is_bf16_supported" in code_synth
+    assert "major >= 8" in code_synth
 

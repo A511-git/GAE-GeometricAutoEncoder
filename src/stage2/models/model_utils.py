@@ -575,10 +575,21 @@ class NormAttention(nn.Module):
                             attn_computed = False
 
                     if not attn_computed:
+                        needs_fp16 = (
+                            orig_dtype == torch.bfloat16
+                            and q_final.is_cuda
+                            and getattr(torch.cuda, "is_available", lambda: False)()
+                            and torch.cuda.get_device_capability(q_final.device)[0] < 8
+                        )
+                        q_sdpa = q_final.half() if needs_fp16 else q_final
+                        k_sdpa = k_final.half() if needs_fp16 else k_final
+                        v_sdpa = v_final.half() if needs_fp16 else v_final
                         x = F.scaled_dot_product_attention(
-                            q_final, k_final, v_final,
+                            q_sdpa, k_sdpa, v_sdpa,
                             dropout_p=self.attn_drop.p if self.training else 0.,
                         )
+                        if needs_fp16:
+                            x = x.to(orig_dtype)
 
                     # 6. Inverse transformation for patches only (prefix tokens unchanged)
                     x_mv = x.reshape(B, self.num_heads, V, N, self.head_dim)
@@ -641,10 +652,21 @@ class NormAttention(nn.Module):
                         attn_computed = False
 
                 if not attn_computed:
+                    needs_fp16 = (
+                        orig_dtype == torch.bfloat16
+                        and q.is_cuda
+                        and getattr(torch.cuda, "is_available", lambda: False)()
+                        and torch.cuda.get_device_capability(q.device)[0] < 8
+                    )
+                    q_sdpa = q.half() if needs_fp16 else q
+                    k_sdpa = k.half() if needs_fp16 else k
+                    v_sdpa = v.half() if needs_fp16 else v
                     x = F.scaled_dot_product_attention(
-                        q, k, v,
+                        q_sdpa, k_sdpa, v_sdpa,
                         dropout_p=self.attn_drop.p if self.training else 0.,
                     )
+                    if needs_fp16:
+                        x = x.to(orig_dtype)
         else:
             q = q * self.scale
             attn = q @ k.transpose(-2, -1)

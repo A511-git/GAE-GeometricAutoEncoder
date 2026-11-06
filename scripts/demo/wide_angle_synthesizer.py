@@ -448,16 +448,13 @@ def run_pipeline(args: argparse.Namespace) -> int:
     # Detect GPUs lacking native hardware BF16 (e.g. SM < 8.0 such as Tesla T4 / Turing)
     is_bf16_ok = True
     if device.type == "cuda":
-        if hasattr(torch.cuda, "is_bf16_supported"):
-            is_bf16_ok = torch.cuda.is_bf16_supported()
-        else:
-            major, _ = torch.cuda.get_device_capability(device)
-            is_bf16_ok = (major >= 8)
+        major, minor = torch.cuda.get_device_capability(device)
+        is_bf16_ok = (major >= 8)
 
     if not is_bf16_ok:
         device_name = torch.cuda.get_device_name(device) if device.type == "cuda" else "Device"
         cap = torch.cuda.get_device_capability(device) if device.type == "cuda" else (0, 0)
-        print(f"[Precision] GPU {device_name} (compute capability {cap[0]}.{cap[1]} < 8.0) does not support native BF16.", flush=True)
+        print(f"[Precision] GPU {device_name} (compute capability {cap[0]}.{cap[1]} < 8.0) lacks hardware BF16 Tensor Cores.", flush=True)
         for attr in ("backbone_precision", "text_precision", "codec_precision", "flow_precision"):
             if getattr(args, attr, None) == "bf16":
                 setattr(args, attr, "fp16")
@@ -566,7 +563,12 @@ def run_pipeline(args: argparse.Namespace) -> int:
     del backbone.encoder
     _free(heavy_vit, stage="DA3 ViT Encoder")
     print("      DA3 ViT offloaded from VRAM (DPT head retained).")
-    _log_memory("After Stage 2 (ViT Offloaded)")
+    del img_tensor, imgs_rgb
+    codec.to("cpu")
+    backbone.to("cpu")
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    _log_memory("After Stage 2 (Codec & Backbone on CPU)")
 
     # ── [3/5] Compute Text Prompt Embeddings (Qwen3) ──
     _log_memory("Before Stage 3 (Text Encode)")
@@ -634,7 +636,9 @@ def run_pipeline(args: argparse.Namespace) -> int:
     _log_memory("After Stage 4 (Flow DiT Offloaded)")
 
     # ── [5/5] Decode Single Combined Wide-Angle Image & 3D Geometry ──
-    _log_memory("Before Stage 5 (VAE & DPT Geometry Decode)")
+    codec.to(device)
+    backbone.to(device)
+    _log_memory("Before Stage 5 (VAE & DPT Geometry Decode on GPU)")
     print("\n[5/5] Decoding final wide-angle photorealistic image...")
     z_dec = z_out.to(_DTYPES[args.codec_precision])
     with torch.inference_mode():

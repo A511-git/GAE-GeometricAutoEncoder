@@ -369,10 +369,24 @@ class PluckerAttention(nn.Module):
                     attn_computed = False
 
             if not attn_computed:
+                # On SM < 8.0 (Turing T4 / Volta V100), PyTorch SDPA does not have fused BF16 kernels
+                # and falls back to Math mode (which materializes an O(N^2) 8.1GB attention matrix and OOMs).
+                # Casting to FP16 enables the fused Cutlass/MemEfficientAttention C++ kernel in SDPA!
+                needs_fp16 = (
+                    orig_dtype == torch.bfloat16
+                    and q.is_cuda
+                    and getattr(torch.cuda, "is_available", lambda: False)()
+                    and torch.cuda.get_device_capability(q.device)[0] < 8
+                )
+                q_sdpa = q.half() if needs_fp16 else q
+                k_sdpa = k.half() if needs_fp16 else k
+                v_sdpa = v.half() if needs_fp16 else v
                 x_attn = F.scaled_dot_product_attention(
-                    q, k, v,
+                    q_sdpa, k_sdpa, v_sdpa,
                     dropout_p=self.attn_drop.p if self.training else 0.0,
                 )
+                if needs_fp16:
+                    x_attn = x_attn.to(orig_dtype)
         else:
             q = q * self.scale
             attn = q @ k.transpose(-2, -1)
